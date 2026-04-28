@@ -47,7 +47,6 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(
         "meta-llama/Llama-3.2-3B",
         device_map="auto",
-        temperature = 0.7,
     )
     model.to(device)
 
