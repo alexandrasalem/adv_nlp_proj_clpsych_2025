@@ -1,6 +1,6 @@
-# adv_nlp_proj_clpsych_2025
+# Advanced NLP Final Project: CLPsych Shared Task 2025
 
-Team members: 
+Team members: Sophie Brown, Alexandra Salem, Tamoghna Chakraborty, & Daniel Weiner
 
 This repository contains our team's CLPsych 2025 shared task project code.
 
