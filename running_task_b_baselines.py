@@ -38,7 +38,7 @@ def main():
     # pulling sample post (for now)
     data = pd.read_csv(post_csv_location)
     for index, row in data.iterrows():
-        post_test = row['post_text']
+        post_test = row['post']
         break
 
     # prepping model
