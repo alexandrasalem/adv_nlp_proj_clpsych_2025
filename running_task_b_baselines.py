@@ -27,12 +27,15 @@ def single_blue_team_post_summary(post_text, model, tokenizer, device):
     {{ "summary": "<post-level summary>" }}
     """
 
-    input_ids = tokenizer(prompt, return_tensors="pt").to(device)
+    inputs = tokenizer(prompt, return_tensors="pt").to(device)
 
-    outputs = model.generate(**input_ids, max_new_tokens=128)
-    print(outputs[0])
-    decoded_output = tokenizer.decode(outputs[0])
-    print(decoded_output)
+    outputs = model.generate(**inputs,
+                             temperature=0.7,
+                             top_p=0.9,
+                             do_sample=True,
+                             max_new_tokens=128)
+    generated_tokens = outputs[0][inputs["input_ids"].shape[-1]:]
+    decoded_output = tokenizer.decode(generated_tokens, skip_special_tokens=True)
     return decoded_output
 
 
@@ -50,7 +53,6 @@ def main():
         "meta-llama/Llama-3.2-3B",
         device_map="auto",
     )
-    model.to(device)
 
     # running on post
     output = single_blue_team_post_summary(post_text = post_test, model = model, tokenizer = tokenizer, device = device)
