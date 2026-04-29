@@ -52,6 +52,7 @@ def main():
     # prepping model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-3B")
+    tokenizer.pad_token = tokenizer.eos_token
     model = AutoModelForCausalLM.from_pretrained(
         "meta-llama/Llama-3.2-3B",
         device_map="auto",
