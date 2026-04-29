@@ -16,31 +16,52 @@ post_csv_location = args.post_csv_location
 # add here
 
 # Baseline from BLUE team
+# def single_blue_team_post_summary(post_text, model, tokenizer, device):
+#     prompt = f"""
+#     Given the following Reddit post, summarize the interplay between adaptive and maladaptive self-states.
+#
+#     Post:
+#     \"{post_text}\"
+#
+#     Response format:
+#     {{ "summary": "<post-level summary>" }}
+#     """
+#
+#     inputs = tokenizer(prompt, return_tensors="pt").to(device)
+#
+#     outputs = model.generate(**inputs,
+#                              temperature=0.7,
+#                              top_p=0.9,
+#                              do_sample=True,
+#                              max_new_tokens=128)
+#     generated_tokens = outputs[0][inputs["input_ids"].shape[-1]:]
+#     decoded_output = tokenizer.decode(generated_tokens, skip_special_tokens=True)
+#     print("here")
+#     print(decoded_output)
+#     print("leaving")
+#     return decoded_output
+
+
 def single_blue_team_post_summary(post_text, model, tokenizer, device):
-    prompt = f"""
-    Given the following Reddit post, summarize the interplay between adaptive and maladaptive self-states.
+    prompt = f"Summarize this:\n{post_text}"
 
-    Post:
-    \"{post_text}\"
+    inputs = tokenizer(prompt, return_tensors="pt")
 
-    Response format:
-    {{ "summary": "<post-level summary>" }}
-    """
+    print("INPUT SHAPE:", inputs["input_ids"].shape)
 
-    inputs = tokenizer(prompt, return_tensors="pt").to(device)
+    outputs = model.generate(
+        **inputs,
+        max_new_tokens=50,
+        do_sample=False,  # turn OFF sampling for debugging
+        pad_token_id=tokenizer.eos_token_id,
+    )
 
-    outputs = model.generate(**inputs,
-                             temperature=0.7,
-                             top_p=0.9,
-                             do_sample=True,
-                             max_new_tokens=128)
-    generated_tokens = outputs[0][inputs["input_ids"].shape[-1]:]
-    decoded_output = tokenizer.decode(generated_tokens, skip_special_tokens=True)
-    print("here")
-    print(decoded_output)
-    print("leaving")
-    return decoded_output
+    print("OUTPUT SHAPE:", outputs.shape)
 
+    decoded_full = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    print("FULL DECODE:", decoded_full)
+
+    return decoded_full
 
 def main():
     # pulling sample post (for now)
