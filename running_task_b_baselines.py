@@ -36,6 +36,9 @@ def single_blue_team_post_summary(post_text, model, tokenizer, device):
                              max_new_tokens=128)
     generated_tokens = outputs[0][inputs["input_ids"].shape[-1]:]
     decoded_output = tokenizer.decode(generated_tokens, skip_special_tokens=True)
+    print("here")
+    print(decoded_output)
+    print("leaving")
     return decoded_output
 
 
