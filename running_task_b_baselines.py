@@ -30,7 +30,9 @@ def single_blue_team_post_summary(post_text, model, tokenizer, device):
     input_ids = tokenizer(prompt, return_tensors="pt").to(device)
 
     outputs = model.generate(**input_ids, max_new_tokens=128)
+    print(outputs[0])
     decoded_output = tokenizer.decode(outputs[0])
+    print(decoded_output)
     return decoded_output
 
 
