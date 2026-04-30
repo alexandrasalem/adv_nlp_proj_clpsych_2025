@@ -46,6 +46,7 @@ def single_blue_team_post_summary(post_text, model, tokenizer, device):
     prompt = f"Summarize this:\n{post_text}"
 
     inputs = tokenizer(prompt, return_tensors="pt")
+    inputs.to(device)
 
     print("INPUT SHAPE:", inputs["input_ids"].shape)
 
