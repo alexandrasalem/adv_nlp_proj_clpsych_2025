@@ -27,8 +27,6 @@ pip install llama-cpp-python numpy scikit-learn huggingface-hub --break-system-p
 The default `pip install llama-cpp-python` installs a CPU-only wheel — passing `n_gpu_layers=-1` will silently do nothing. To run the LLM on an NVIDIA GPU, install the prebuilt CUDA wheel from abetlen's index:
 
 ```powershell
-pip uninstall llama-cpp-python -y
-pip cache remove llama_cpp_python
 pip install llama-cpp-python --index-url https://abetlen.github.io/llama-cpp-python/whl/cu124 --no-cache-dir
 ```
 
