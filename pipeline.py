@@ -18,12 +18,12 @@ import json
 import os
 import argparse
 import time
+import datetime
 from pathlib import Path
 from dataclasses import dataclass, field
 
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.metrics import classification_report, accuracy_score
 
 from llama_cpp import Llama
 
@@ -310,83 +310,43 @@ def run_abcd_classification(
     llm: Llama,
     posts: list[PostProfile],
     verbose: bool = True
-) -> tuple[list[EvidenceSpan], dict]:
+) -> list[EvidenceSpan]:
     """
     Run Task A.3: classify each gold evidence span into ABCD categories.
 
-    Returns:
-        all_spans: flat list of all evidence spans with predictions
-        metrics: classification metrics dict
+    This function only produces predictions and stores them on each span.
+    Metric computation (accuracy, macro-F1, classification report) lives in
+    `evaluation.py` — call `Evaluator.evaluate_task_a3(...)` on the
+    `task_a3_predictions.json` file written by main().
+
+    Returns the flat list of all evidence spans with `predicted_abcd_key` set.
     """
     print("\n" + "=" * 60)
     print("TASK A.3: ABCD Classification of Evidence Spans")
     print("=" * 60)
 
-    all_spans = []
-    for post in posts:
-        for span in post.evidence_spans:
-            all_spans.append(span)
+    all_spans = [span for post in posts for span in post.evidence_spans]
 
     if not all_spans:
         print("No evidence spans to classify.")
-        return [], {}
+        return []
 
     print(f"Classifying {len(all_spans)} evidence spans...")
 
-    gold_labels = []
-    pred_labels = []
-
+    n_correct = 0
     for i, span in enumerate(all_spans):
         prompt = build_abcd_classification_prompt(span.text, span.polarity)
         raw_output = generate(llm, prompt, max_tokens=20)
-        predicted = parse_abcd_prediction(raw_output)
-        span.predicted_abcd_key = predicted
-
-        gold_labels.append(span.gold_abcd_key)
-        pred_labels.append(predicted)
+        span.predicted_abcd_key = parse_abcd_prediction(raw_output)
+        n_correct += int(span.predicted_abcd_key == span.gold_abcd_key)
 
         if verbose and (i + 1) % 25 == 0:
-            running_acc = sum(
-                1 for g, p in zip(gold_labels, pred_labels) if g == p
-            ) / len(gold_labels)
+            running_acc = n_correct / (i + 1)
             print(f"  [{i+1}/{len(all_spans)}] Running accuracy: {running_acc:.3f}")
 
-    # Compute metrics
-    accuracy = accuracy_score(gold_labels, pred_labels)
-    report = classification_report(
-        gold_labels, pred_labels,
-        labels=ABCD_KEYS,
-        target_names=[ABCD_DEFINITIONS[k]["name"] for k in ABCD_KEYS],
-        output_dict=True,
-        zero_division=0,
-    )
-    report_str = classification_report(
-        gold_labels, pred_labels,
-        labels=ABCD_KEYS,
-        target_names=[ABCD_DEFINITIONS[k]["name"] for k in ABCD_KEYS],
-        zero_division=0,
-    )
-
-    print(f"\nOverall accuracy: {accuracy:.3f}")
-    print(f"\nClassification report:\n{report_str}")
-
-    # Per-polarity accuracy
-    for pol in ["adaptive", "maladaptive"]:
-        pol_mask = [s.polarity == pol for s in all_spans]
-        pol_gold = [g for g, m in zip(gold_labels, pol_mask) if m]
-        pol_pred = [p for p, m in zip(pred_labels, pol_mask) if m]
-        if pol_gold:
-            pol_acc = accuracy_score(pol_gold, pol_pred)
-            print(f"  {pol.capitalize()} spans accuracy: {pol_acc:.3f} (n={len(pol_gold)})")
-
-    metrics = {
-        "accuracy": accuracy,
-        "report": report,
-        "n_spans": len(all_spans),
-        "n_unknown": sum(1 for p in pred_labels if p == "UNKNOWN"),
-    }
-
-    return all_spans, metrics
+    print(f"\nClassified {len(all_spans)} spans. "
+          f"Run evaluation.py --task a3 to compute final metrics.")
+    return all_spans
 
 
 # ── Structural Profile Construction ──────────────────────────────────────────
@@ -653,6 +613,7 @@ def run_task_b(
             "wellbeing": post.wellbeing,
             "gold_summary": post.gold_summary,
             "n_evidence_spans": len(post.evidence_spans),
+            "evidence_texts": [s.text for s in post.evidence_spans],
         }
 
         # ── Zero-shot ──
@@ -681,7 +642,7 @@ def run_task_b(
         results.append(entry)
 
     # Save results
-    output_path = os.path.join(output_dir, "task_b_results.json")
+    output_path = os.path.join(output_dir, f"task_b_results_{datetime.datetime.now().strftime("%Y%m%d-%H%M%S")}.json")
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
     print(f"\nSaved {len(results)} summaries to {output_path}")
@@ -777,7 +738,7 @@ def run_cross_validation(
         all_results.extend(tl_results)
 
     # Save consolidated results
-    cv_path = os.path.join(output_dir, "task_b_cv_results.json")
+    cv_path = os.path.join(output_dir, f"task_b_cv_results_{datetime.datetime.now().strftime("%Y%m%d-%H%M%S")}.json")
     with open(cv_path, "w", encoding="utf-8") as f:
         json.dump(all_results, f, indent=2, ensure_ascii=False)
     print(f"\nSaved cross-validation results ({len(all_results)} summaries) to {cv_path}")
@@ -826,30 +787,31 @@ def main():
     )
 
     # ── Task A.3: ABCD Classification ──
+    # Predictions only — metrics are computed by evaluation.py.
     use_predicted = False
     if not args.skip_a3:
-        all_spans, a3_metrics = run_abcd_classification(
+        all_spans = run_abcd_classification(
             llm, annotated_posts, verbose=args.verbose
         )
         use_predicted = True
 
-        # Save A.3 results
         a3_output = {
-            "metrics": {k: v for k, v in a3_metrics.items() if k != "report"},
-            "accuracy": a3_metrics.get("accuracy", 0),
             "spans": [
                 {
                     "text": s.text[:100],  # truncate for privacy
                     "gold": s.gold_abcd_key,
                     "predicted": s.predicted_abcd_key,
                     "polarity": s.polarity,
-                    "correct": s.gold_abcd_key == s.predicted_abcd_key,
+                    "timeline_id": s.timeline_id,
+                    "post_index": s.post_index,
                 }
                 for s in all_spans
             ],
         }
-        with open(os.path.join(args.output_dir, "task_a3_results.json"), "w") as f:
+        a3_path = os.path.join(args.output_dir, f"task_a3_predictions_{datetime.datetime.now().strftime("%Y%m%d-%H%M%S")}.json")
+        with open(a3_path, "w") as f:
             json.dump(a3_output, f, indent=2)
+        print(f"Saved A.3 predictions to {a3_path}")
 
     # ── Build structural profiles ──
     build_all_profiles(annotated_posts, use_predicted=use_predicted)
