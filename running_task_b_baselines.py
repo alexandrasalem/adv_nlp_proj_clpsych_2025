@@ -4,7 +4,14 @@ import pandas as pd
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import tqdm
+import argparse
 
+parser = argparse.ArgumentParser(description="Arguments for setting up the baseline runs.")
+parser.add_argument("--post_csv_location", default = "post_data.csv", help="full path to the data folder")
+
+args = parser.parse_args()
+
+post_csv_location = args.post_csv_location
 
 def blue_baseline_one_post(post_text):
       prompt = f"""
@@ -81,3 +88,6 @@ def run_task_b_official_baseline(post_csv_location):
     new_csv_name = f'{post_csv_location[:-4]}_task_b_official_baseline.csv'
     data.to_csv(new_csv_name, index=False)
 
+if __name__ == "__main__":
+    run_task_b_official_baseline(post_csv_location)
+    run_task_b_blue_baseline(post_csv_location)
