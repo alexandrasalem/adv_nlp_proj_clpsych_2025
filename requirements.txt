@@ -1,1 +1,5 @@
 pandas
+transformers
+torch
+accelerate
+ollama
