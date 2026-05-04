@@ -224,8 +224,11 @@ class Evaluator:
         gold = [s["gold"] for s in spans]
         pred = [s["predicted"] for s in spans]
 
+        # Returns the fraction of correctly classified samples
         accuracy = accuracy_score(gold, pred)
+        # Calculate metrics for each label, and find their unweighted mean
         macro_f1 = f1_score(gold, pred, labels=ABCD_KEYS, average="macro", zero_division=0)
+        # Provides a detailed breakdown of precision, recall, and F1-score per class
         report_str = classification_report(
             gold, pred,
             labels=ABCD_KEYS,
@@ -488,7 +491,7 @@ def _extract_timestamp(predictions_path: str) -> str:
     stem = os.path.basename(predictions_path)
     if stem.endswith(".json"):
         stem = stem[: -len(".json")]
-    m = re.search(r"_(\d+(?:\.\d+)?)$", stem)
+    m = re.search(r"_(\d{8}-\d{6}|\d+(?:\.\d+)?)$", stem)
     if not m:
         raise ValueError(
             f"Could not extract timestamp from filename '{predictions_path}'. "

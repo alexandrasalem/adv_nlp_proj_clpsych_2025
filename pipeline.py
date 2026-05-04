@@ -105,10 +105,14 @@ class PostProfile:
     wellbeing: float
     gold_summary: str
     evidence_spans: list        # list of EvidenceSpan
+    is_annotated: bool = True   # False for surrounding-context-only posts
     # The 12-dim binary profile + wellbeing + ratio
     structural_vector: np.ndarray = None
     # Classified ABCD labels (from Task A.3)
     classified_abcd: dict = field(default_factory=dict)
+    # Surrounding posts in the same timeline, used as prompt context.
+    # List of dicts: {"post_index": int, "post_text": str, "position": "before"|"after"}
+    context_posts: list = field(default_factory=list)
 
 
 # ── Data Loading ─────────────────────────────────────────────────────────────
@@ -134,45 +138,56 @@ def load_timelines(data_dir: str) -> list[dict]:
     return timelines
 
 
-def extract_posts(timelines: list[dict]) -> list[PostProfile]:
-    """Extract all annotated posts into PostProfile objects."""
+def extract_posts(
+    timelines: list[dict],
+    context_window: int = 1,
+) -> list[PostProfile]:
+    """
+    Extract every post in every timeline into PostProfile objects.
+
+    Annotated posts (those with `Post Summary` or `Well-being` set) get
+    `is_annotated=True` and their evidence spans parsed. Unannotated posts
+    are kept too — they are used as surrounding-context in the summarization
+    prompts but never summarized themselves.
+
+    After extraction, each annotated post is given a `context_posts` list
+    containing the `context_window` posts immediately before and after it in
+    the same timeline (ordered by `post_index`). Context posts can be either
+    annotated or unannotated.
+    """
     posts = []
     for tl in timelines:
         tl_id = tl.get("timeline_id", "unknown")
         for post_data in tl.get("posts", []):
-            evidence = post_data.get("evidence", {})
-
-            # Skip unannotated posts
             wb = post_data.get("Well-being", None)
             summary = post_data.get("Post Summary", None)
-            if wb is None and summary is None:
-                continue
+            is_annotated = not (wb is None and summary is None)
 
-            # Parse well-being
             try:
                 wb_float = float(str(wb).strip())
             except (ValueError, TypeError):
                 wb_float = None
 
-            # Extract evidence spans with gold ABCD labels
             spans = []
-            for state_type in STATE_TYPES:
-                polarity = "adaptive" if state_type == "adaptive-state" else "maladaptive"
-                state_data = evidence.get(state_type, {})
-                for abcd_key in ABCD_KEYS:
-                    if abcd_key in state_data:
-                        span_info = state_data[abcd_key]
-                        span_text = span_info.get("highlighted_evidence", "")
-                        category = span_info.get("Category", "")
-                        if span_text:
-                            spans.append(EvidenceSpan(
-                                text=span_text,
-                                gold_abcd_key=abcd_key,
-                                gold_category=category,
-                                polarity=polarity,
-                                timeline_id=tl_id,
-                                post_index=post_data.get("post_index", -1),
-                            ))
+            if is_annotated:
+                evidence = post_data.get("evidence", {})
+                for state_type in STATE_TYPES:
+                    polarity = "adaptive" if state_type == "adaptive-state" else "maladaptive"
+                    state_data = evidence.get(state_type, {})
+                    for abcd_key in ABCD_KEYS:
+                        if abcd_key in state_data:
+                            span_info = state_data[abcd_key]
+                            span_text = span_info.get("highlighted_evidence", "")
+                            category = span_info.get("Category", "")
+                            if span_text:
+                                spans.append(EvidenceSpan(
+                                    text=span_text,
+                                    gold_abcd_key=abcd_key,
+                                    gold_category=category,
+                                    polarity=polarity,
+                                    timeline_id=tl_id,
+                                    post_index=post_data.get("post_index", -1),
+                                ))
 
             posts.append(PostProfile(
                 timeline_id=tl_id,
@@ -181,16 +196,37 @@ def extract_posts(timelines: list[dict]) -> list[PostProfile]:
                 wellbeing=wb_float,
                 gold_summary=summary or "",
                 evidence_spans=spans,
+                is_annotated=is_annotated,
             ))
 
-    annotated = [p for p in posts if p.evidence_spans]
-    print(f"Extracted {len(posts)} posts total, {len(annotated)} with evidence spans")
+    # Attach surrounding-context posts within each timeline.
+    by_timeline: dict[str, list[PostProfile]] = {}
+    for p in posts:
+        by_timeline.setdefault(p.timeline_id, []).append(p)
+    for tl_posts in by_timeline.values():
+        tl_posts.sort(key=lambda p: p.post_index)
+        for i, p in enumerate(tl_posts):
+            if not p.is_annotated:
+                continue
+            before = tl_posts[max(0, i - context_window): i]
+            after = tl_posts[i + 1: i + 1 + context_window]
+            p.context_posts = (
+                [{"post_index": q.post_index, "post_text": q.post_text, "position": "before"}
+                 for q in before]
+                + [{"post_index": q.post_index, "post_text": q.post_text, "position": "after"}
+                   for q in after]
+            )
+
+    annotated = [p for p in posts if p.is_annotated]
+    with_evidence = [p for p in annotated if p.evidence_spans]
+    print(f"Extracted {len(posts)} posts total, "
+          f"{len(annotated)} annotated, {len(with_evidence)} with evidence spans")
     return posts
 
 
 # ── Model Loading ────────────────────────────────────────────────────────────
 
-def load_model(model_path: str = None, n_ctx: int = 4096, n_gpu_layers: int = -1) -> Llama:
+def load_model(model_path: str = None, n_ctx: int = 16384, n_gpu_layers: int = -1) -> Llama:
     """
     Load the Llama model from a local GGUF file or download from HuggingFace.
 
@@ -205,7 +241,7 @@ def load_model(model_path: str = None, n_ctx: int = 4096, n_gpu_layers: int = -1
             model_path=model_path,
             n_ctx=n_ctx,
             n_gpu_layers=n_gpu_layers,
-            verbose=True,
+            verbose=False,
         )
     else:
         print(f"Downloading model from HuggingFace: {_LLAMA_REPO_ID}")
@@ -214,7 +250,7 @@ def load_model(model_path: str = None, n_ctx: int = 4096, n_gpu_layers: int = -1
             filename=_LLAMA_FILENAME,
             n_ctx=n_ctx,
             n_gpu_layers=n_gpu_layers,
-            verbose=True,
+            verbose=False,
         )
     print("Model loaded successfully")
     return llm
@@ -336,6 +372,8 @@ def run_abcd_classification(
     n_correct = 0
     for i, span in enumerate(all_spans):
         prompt = build_abcd_classification_prompt(span.text, span.polarity)
+        # MAX_TOKENS=20 bc all we want is a category, 1-3 tokens for category plus a safety net
+        # parse_abcd_prediction() gets just the category if LLM is chatty
         raw_output = generate(llm, prompt, max_tokens=20)
         span.predicted_abcd_key = parse_abcd_prediction(raw_output)
         n_correct += int(span.predicted_abcd_key == span.gold_abcd_key)
@@ -373,6 +411,7 @@ def build_structural_profile(post: PostProfile, use_predicted: bool = False) -> 
         abcd_key = span.predicted_abcd_key if use_predicted else span.gold_abcd_key
         if abcd_key not in ABCD_KEYS:
             continue
+        # show which span keys are present in binary vector
         key_idx = ABCD_KEYS.index(abcd_key)
         if span.polarity == "adaptive":
             profile[key_idx] = 1.0           # indices 0-5: adaptive
@@ -427,8 +466,10 @@ def retrieve_nearest(
     # Filter pool
     candidates = []
     for p in pool:
+        # must have structural vector profile
         if p.structural_vector is None:
             continue
+        # must be in different timeline if exclude_same_timeline=True
         if exclude_same_timeline and p.timeline_id == target.timeline_id:
             continue
         # Don't retrieve the exact same post
@@ -485,15 +526,47 @@ def format_evidence_for_prompt(post: PostProfile, use_predicted: bool = False) -
     return "\n".join(parts)
 
 
+def format_context_for_prompt(post: PostProfile) -> str:
+    """
+    Format a post's surrounding-context posts for inclusion in a prompt.
+
+    Returns an empty string if there is no context. Otherwise returns a
+    block listing posts that came BEFORE and AFTER the target post in
+    the same timeline (oldest first within each section).
+    """
+    if not post.context_posts:
+        return ""
+
+    before = [c for c in post.context_posts if c["position"] == "before"]
+    after = [c for c in post.context_posts if c["position"] == "after"]
+
+    parts = []
+    if before:
+        parts.append("Earlier posts in this timeline:")
+        for c in before:
+            parts.append(f'  [post {c["post_index"]}] "{c["post_text"]}"')
+    if after:
+        parts.append("Later posts in this timeline:")
+        for c in after:
+            parts.append(f'  [post {c["post_index"]}] "{c["post_text"]}"')
+    return "\n".join(parts)
+
+
 def build_zero_shot_prompt(post: PostProfile, use_predicted: bool = False) -> str:
     """
     Build a zero-shot prompt for Task B post-level summarization.
 
-    Includes the post text, extracted evidence with ABCD classifications,
-    and well-being score.
+    Includes any surrounding-timeline context, the post text, extracted
+    evidence with ABCD classifications, and well-being score.
     """
     evidence_text = format_evidence_for_prompt(post, use_predicted)
     wb_str = f"{post.wellbeing:.0f}" if post.wellbeing is not None else "Unknown"
+    context_text = format_context_for_prompt(post)
+    context_block = (
+        f"For situational context only (do NOT summarize these), here are the "
+        f"surrounding posts in the same timeline:\n{context_text}\n\n"
+        if context_text else ""
+    )
 
     prompt = f"""You are a clinical psychology expert analyzing social media posts for mental health dynamics.
 
@@ -505,7 +578,7 @@ Analyze the following social media post and generate a clinical summary of the p
 4. If both adaptive and maladaptive states are present, describe each in turn, noting their interplay.
 5. Keep the summary concise (3-6 sentences). Only describe observations fully supported by the text.
 
-Post content:
+{context_block}Post to summarize:
 "{post.post_text}"
 
 Extracted evidence with ABCD classifications:
@@ -529,13 +602,19 @@ def build_one_shot_prompt(
     The example serves as a demonstration of how the model should structure
     its summary, grounded in a structurally similar post.
     """
-    # Format the example
-    ex_evidence = format_evidence_for_prompt(example, use_predicted=False)  # always use gold for examples
+    # Format the example (always use gold ABCD for the demonstration)
+    ex_evidence = format_evidence_for_prompt(example, use_predicted=False)
     ex_wb = f"{example.wellbeing:.0f}" if example.wellbeing is not None else "Unknown"
 
     # Format the target
     tgt_evidence = format_evidence_for_prompt(post, use_predicted)
     tgt_wb = f"{post.wellbeing:.0f}" if post.wellbeing is not None else "Unknown"
+    tgt_context = format_context_for_prompt(post)
+    tgt_context_block = (
+        f"For situational context only (do NOT summarize these), here are the "
+        f"surrounding posts in the same timeline:\n{tgt_context}\n\n"
+        if tgt_context else ""
+    )
 
     prompt = f"""You are a clinical psychology expert analyzing social media posts for mental health dynamics.
 
@@ -564,7 +643,7 @@ Summary:
 
 Now summarize the following post in the same style:
 
-Post content:
+{tgt_context_block}Post to summarize:
 "{post.post_text}"
 
 Extracted evidence with ABCD classifications:
@@ -677,8 +756,9 @@ def print_retrieval_analysis(posts: list[PostProfile]):
 
     # Pairwise similarity distribution
     if len(vectors) > 1:
+        # NxN matrix where (i,j) is the cosine similarity between post i's structural vector and post j's structural vector
         sims = cosine_similarity(vectors)
-        # Get upper triangle (exclude diagonal)
+        # Get upper triangle (exclude diagonal) bc matrix is symmetric and diagonals are 1.0
         upper = sims[np.triu_indices_from(sims, k=1)]
         print(f"  Pairwise cosine similarity:")
         print(f"    Mean: {upper.mean():.3f}")
@@ -758,7 +838,7 @@ def main():
                         help="Directory to save outputs")
     parser.add_argument("--model_path", type=str, default=None,
                         help="Path to local .gguf model file (downloads from HF if not set)")
-    parser.add_argument("--n_ctx", type=int, default=4096,
+    parser.add_argument("--n_ctx", type=int, default=16384,
                         help="Context window size for the model")
     parser.add_argument("--n_gpu_layers", type=int, default=-1,
                         help="GPU layers to offload (-1 = all)")
@@ -766,6 +846,9 @@ def main():
                         help="Skip Task A.3 and use gold ABCD labels directly")
     parser.add_argument("--cross_validate", action="store_true",
                         help="Run leave-one-timeline-out cross-validation")
+    parser.add_argument("--context_window", type=int, default=2,
+                        help="Number of surrounding posts (before and after) to "
+                             "include from the same timeline as prompt context. 0 disables.")
     parser.add_argument("--verbose", action="store_true", default=True,
                         help="Print detailed progress")
 
@@ -774,7 +857,7 @@ def main():
 
     # ── Load data ──
     timelines = load_timelines(args.data_dir)
-    posts = extract_posts(timelines)
+    posts = extract_posts(timelines, context_window=args.context_window)
 
     annotated_posts = [p for p in posts if p.evidence_spans and p.gold_summary]
     print(f"Posts with both evidence and summaries: {len(annotated_posts)}")
