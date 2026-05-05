@@ -38,6 +38,7 @@ import json
 import os
 import warnings
 from dataclasses import dataclass
+import pandas as pd
 
 import numpy as np
 import torch
@@ -447,6 +448,49 @@ class Evaluator:
                 "evidence_alignment": b.evidence_alignment,
             },
         }
+    def evaluate_baseline_output(
+        self,
+        results_path: str,
+        mode: str = "baseline_official",
+    ) -> dict:
+        """
+        Evaluate Task B baslines from `running_task_b_baselines.py`'s post_data_task_b_x_baseline.csv output.
+
+        Args:
+            results_path: Path to task_b_results.json or task_b_cv_results.json
+            mode: "zero_shot" or "one_shot"
+        """
+        if mode == "baseline_official":
+            baseline_column = "task_b_baseline_official_summaries"
+        elif mode == "baseline_blue":
+            baseline_column = "task_b_baseline_blue_team_summaries"
+        print(f"\nLoading baseline results from: {results_path}")
+        results = pd.read_csv(results_path)
+
+        valid_gold = []
+        valid_predicted = []
+        for _, row in results.iterrows():
+            if row['post_summary']!="NONE" and row[baseline_column] is not None:
+                valid_gold.append(row['post_summary'])
+                valid_predicted.append(row[baseline_column])
+
+        print(f"Found {len(valid_gold)} posts with both gold and baseline summaries")
+        if not valid_gold:
+            return {}
+
+        evidence = None
+
+        b = self.evaluate_task_b(valid_predicted, valid_gold, evidence)
+
+        return {
+            "mode": mode,
+            "n_evaluated": len(valid_gold),
+            "task_b": {
+                "consistency": b.consistency,
+                "contradiction": b.contradiction,
+                "evidence_alignment": b.evidence_alignment,
+            },
+        }
 
     def compare_modes(self, results_path: str) -> dict:
         """Compare zero-shot vs one-shot summaries from pipeline output."""
@@ -519,7 +563,7 @@ def main():
                              "(task_a3_predictions_<ts>.json for --task a3, "
                              "task_b_results_<ts>.json for --task b)")
     parser.add_argument("--mode", type=str, default="both",
-                        choices=["zero_shot", "one_shot", "both"],
+                        choices=["zero_shot", "one_shot", "both", "baseline_official", "baseline_blue"],
                         help="Task B only: which summary mode to evaluate")
     parser.add_argument("--device", type=str, default=None,
                         help="Device: 'cuda' or 'cpu' (auto-detects if not set)")
@@ -529,9 +573,9 @@ def main():
     args = parser.parse_args()
     evaluator = Evaluator(device=args.device, batch_size=args.batch_size)
 
-    output_path = _eval_output_path(args.results, args.task)
 
     if args.task == "a3":
+        output_path = _eval_output_path(args.results, args.task)
         results = evaluator.evaluate_task_a3(args.results)
         payload = {
             "source": os.path.basename(args.results),
@@ -545,9 +589,16 @@ def main():
 
     elif args.task == "b":
         if args.mode == "both":
+            output_path = _eval_output_path(args.results, args.task)
             comparison = evaluator.compare_modes(args.results)
             payload = {"source": os.path.basename(args.results), **comparison}
+        elif args.mode == "baseline_official" or args.mode == "baseline_blue":
+            output_path = f'{args.results[:-4]}_evaluation.json'
+            results = evaluator.evaluate_baseline_output(args.results, args.mode)
+            print(results)
+            payload = {"source": os.path.basename(args.results), **results}
         else:
+            output_path = _eval_output_path(args.results, args.task)
             results = evaluator.evaluate_pipeline_output(args.results, mode=args.mode)
             payload = {"source": os.path.basename(args.results), **results}
 
