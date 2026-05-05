@@ -17,7 +17,6 @@ NOTE: Teammate has a 4080 super to run locally, testing can be done by @danwein8
 import json
 import os
 import argparse
-import time
 import datetime
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -46,38 +45,38 @@ ABCD_DEFINITIONS = {
     "A": {
         "name": "Affect",
         "description": "The type of emotion expressed by the person.",
-        "adaptive_examples": "Calm/Laid back, Emotional Pain/Grieving, Content/Happy, Vigor/Energetic, Justifiable Anger/Assertive Anger, Proud",
-        "maladaptive_examples": "Anxious/Tense/Fearful, Depressed/Desperate/Hopeless, Mania, Apathetic/Don't care/Blunted, Angry (Aggressive, Disgust, Contempt), Ashamed/Guilty",
+        "adaptive_examples": "Calm or Laid back, Healthy Emotional Pain or Grieving, Content or Happy, Vigor or Energetic (calm energy not agitated), Justifiable Anger or Assertive Anger, Proud, Joy, Hopeful",
+        "maladaptive_examples": "Anxious or Tense or Fearful, Depressed or Desperate or Hopeless, Mania, Apathetic or Don't care or Blunted, Angry (Aggressive, Disgust, Contempt), Ashamed or Guilty",
     },
     "B-O": {
         "name": "Behavior toward the Other",
         "description": "The person's main behavior(s) toward the other.",
-        "adaptive_examples": "Relating behavior, Autonomous behavior",
-        "maladaptive_examples": "Fight or flight behavior, Overcontrolled/controlling behavior",
+        "adaptive_examples": "Relating behavior, Connecting or communicating with the other, expressing care, listening, sharing feelings, Allowing autonomous behavior",
+        "maladaptive_examples": "Fight or flight behavior, Controlling or Dominating behavior, Overcontrolled around other",
     },
     "B-S": {
         "name": "Behavior toward the Self",
         "description": "The person's main behavior(s) toward the self.",
         "adaptive_examples": "Self-care behavior",
-        "maladaptive_examples": "Self-harm/Neglect/Avoidance behavior",
+        "maladaptive_examples": "Self-harm or Neglect or Avoidance behavior",
     },
     "C-O": {
         "name": "Cognition of the Other",
         "description": "The person's main perceptions of the other.",
-        "adaptive_examples": "Perception of the other as related, Perception of the other as facilitating autonomy/competence needs",
+        "adaptive_examples": "Perception of the other as caring attuned or emotionally connected, Perception of the other as facilitating autonomy or competence needs",
         "maladaptive_examples": "Perception of the other as detached or over attached, Perception of the other as blocking autonomy needs",
     },
     "C-S": {
         "name": "Cognition of the Self",
         "description": "The person's main self-perceptions.",
         "adaptive_examples": "Self-acceptance and self-compassion",
-        "maladaptive_examples": "Self-criticism",
+        "maladaptive_examples": "Self-criticism, Self-loathing, sense of worthlessness",
     },
     "D": {
         "name": "Desire",
         "description": "The person's main desire, need, intention, fear or expectation.",
-        "adaptive_examples": "Relatedness, Autonomy and adaptive control, Competence, Self-esteem, Self-care",
-        "maladaptive_examples": "Expectation that relatedness need will not be met, Expectation that autonomy needs will not be met, Expectation that competence needs will not be met",
+        "adaptive_examples": "Desire for Relatedness, Desire for Autonomy and adaptive control, Desire for Competence, Need for Self-esteem or worth, Desire for Self-care",
+        "maladaptive_examples": "Expectation that relatedness need will not be met, Expectation that autonomy needs will not be met, Expectation that competence needs will not be met, Fear of abandonment, Fear of failure, Fear of bring controlled",
     },
 }
 
@@ -269,12 +268,59 @@ def generate(llm: Llama, prompt: str, max_tokens: int = 256, temperature: float 
 
 # ── Task A.3: ABCD Classification ────────────────────────────────────────────
 
-def build_abcd_classification_prompt(span_text: str, polarity: str) -> str:
+def _highlight_span_in_post(post_text: str, span_text: str) -> tuple[str, bool]:
+    """
+    Try to highlight the span inline within the post text using «» markers.
+    
+    Returns (highlighted_text, success). If the span isn't found verbatim,
+    returns the original text unchanged and success=False
+    """
+    idx = post_text.find(span_text)
+    if idx != -1:
+        before = post_text[:idx]
+        after = post_text[idx + len(span_text):]
+        highlighted = f"{before}«{span_text}»{after}"
+        return highlighted, True
+    
+    # Try with normalized whitespace
+    import re
+    norm_post = re.sub(r'\s+', ' ', post_text)
+    norm_span = re.sub(r'\s+', ' ', span_text)
+    idx = norm_post.find(norm_span)
+    if idx != -1:
+        # Reconstruct with markers in the normalized version
+        before = norm_post[:idx]
+        after = norm_post[idx + len(norm_span):]
+        highlighted = f"{before}«{norm_span}»{after}"
+        return highlighted, True
+    
+    return post_text, False
+
+
+def build_abcd_classification_prompt(
+        span_text: str,
+        polarity: str,
+        post: "PostProfile" = None,
+        use_context: bool = True
+    ) -> str:
     """
     Build a prompt to classify an evidence span into one of the 6 ABCD categories.
 
     The span is already known to be adaptive or maladaptive. The model just
     needs to determine which psychological dimension it reflects.
+
+    When `post` is provided and `use_context` is True, the prompt includes the
+    full text of the post the span resides in, with the span highlighted inline
+    using «» markers. No other posts from the timeline are included — A.3 is
+    classified using only the containing post as context. If the span isn't
+    found verbatim in the post, falls back to showing the post text and span
+    side-by-side.
+
+    Prompt ordering (last = closest to the response):
+        [role / instructions]
+        [ABCD category definitions]
+        [Post text with highlighted span]
+        [Span + polarity + imperative]
     """
     polarity_label = polarity.capitalize()
 
@@ -285,10 +331,24 @@ def build_abcd_classification_prompt(span_text: str, polarity: str) -> str:
         defn = ABCD_DEFINITIONS[key]
         examples = defn[example_key]
         category_defs.append(
-            f"- {key} ({defn['name']}): {defn['description']} "
+            f"- {key} = ({defn['name']}): {defn['description']} "
             f"Examples of {polarity} sub-categories: {examples}"
         )
     categories_text = "\n".join(category_defs)
+
+    post_block = ""
+    if post is not None and use_context:
+        highlighted, found_inline = _highlight_span_in_post(post.post_text, span_text)
+        if found_inline:
+            post_block = (
+                f"The post containing the span (the span is marked with «»):\n"
+                f'"{highlighted}"\n\n'
+            )
+        else:
+            post_block = (
+                f"The post containing the span:\n"
+                f'"{post.post_text}"\n\n'
+            )
 
     prompt = f"""You are a clinical psychology expert classifying mental health evidence spans.
 
@@ -296,8 +356,7 @@ Given a text span from a social media post that has been identified as reflectin
 
 {categories_text}
 
-Text span: "{span_text}"
-This span reflects a {polarity_label} self-state.
+{post_block}The span to classify (already identified as {polarity_label}): "{span_text}"
 
 Respond with ONLY the category key (one of: A, B-O, B-S, C-O, C-S, D) and nothing else."""
 
@@ -341,49 +400,80 @@ def parse_abcd_prediction(raw_output: str) -> str:
 
     return "UNKNOWN"
 
-
 def run_abcd_classification(
     llm: Llama,
     posts: list[PostProfile],
-    verbose: bool = True
+    use_context: bool = True,
+    verbose: bool = True,
 ) -> list[EvidenceSpan]:
     """
     Run Task A.3: classify each gold evidence span into ABCD categories.
 
-    This function only produces predictions and stores them on each span.
-    Metric computation (accuracy, macro-F1, classification report) lives in
-    `evaluation.py` — call `Evaluator.evaluate_task_a3(...)` on the
-    `task_a3_predictions.json` file written by main().
+    Iterates (post, span) pairs so that each span's prompt can include
+    the containing post's text for disambiguation.
+
+    Args:
+        llm: The loaded language model.
+        posts: List of annotated PostProfile objects.
+        use_context: If True, include the containing post's text (with the
+                     span highlighted inline) in the classification prompt.
+                     If False, classify from the span text alone (baseline
+                     for A/B comparison). Surrounding-timeline posts are
+                     never included for A.3.
+        verbose: Print progress every 25 spans.
 
     Returns the flat list of all evidence spans with `predicted_abcd_key` set.
     """
     print("\n" + "=" * 60)
     print("TASK A.3: ABCD Classification of Evidence Spans")
+    print(f"  Context: {'ON' if use_context else 'OFF'}")
     print("=" * 60)
 
-    all_spans = [span for post in posts for span in post.evidence_spans]
+    # Build (post, span) pairs to preserve the post→span link
+    post_span_pairs = [
+        (post, span)
+        for post in posts
+        for span in post.evidence_spans
+    ]
 
-    if not all_spans:
+    if not post_span_pairs:
         print("No evidence spans to classify.")
         return []
 
-    print(f"Classifying {len(all_spans)} evidence spans...")
+    print(f"Classifying {len(post_span_pairs)} evidence spans...")
 
     n_correct = 0
-    for i, span in enumerate(all_spans):
-        prompt = build_abcd_classification_prompt(span.text, span.polarity)
-        # MAX_TOKENS=20 bc all we want is a category, 1-3 tokens for category plus a safety net
-        # parse_abcd_prediction() gets just the category if LLM is chatty
+    first_prompt_printed = False
+
+    for i, (post, span) in enumerate(post_span_pairs):
+        prompt = build_abcd_classification_prompt(
+            span_text=span.text,
+            polarity=span.polarity,
+            post=post if use_context else None,
+            use_context=use_context,
+        )
+
+        # Print the first prompt for sanity-checking (point 7 from the notes)
+        if not first_prompt_printed:
+            print("\n── FIRST A.3 PROMPT (for sanity check) ──")
+            print(prompt)
+            print("── END FIRST PROMPT ──\n")
+            first_prompt_printed = True
+
+        # MAX_TOKENS=20 bc all we want is a category key (1-3 tokens + safety)
         raw_output = generate(llm, prompt, max_tokens=20)
         span.predicted_abcd_key = parse_abcd_prediction(raw_output)
         n_correct += int(span.predicted_abcd_key == span.gold_abcd_key)
 
         if verbose and (i + 1) % 25 == 0:
             running_acc = n_correct / (i + 1)
-            print(f"  [{i+1}/{len(all_spans)}] Running accuracy: {running_acc:.3f}")
+            print(f"  [{i+1}/{len(post_span_pairs)}] Running accuracy: {running_acc:.3f}")
 
-    print(f"\nClassified {len(all_spans)} spans. "
-          f"Run evaluation.py --task a3 to compute final metrics.")
+    final_acc = n_correct / len(post_span_pairs) if post_span_pairs else 0
+    print(f"\nClassified {len(post_span_pairs)} spans (accuracy: {final_acc:.3f}). "
+          f"Run evaluation.py --task a3 to compute full metrics.")
+
+    all_spans = [span for _, span in post_span_pairs]
     return all_spans
 
 
@@ -567,16 +657,20 @@ def build_zero_shot_prompt(post: PostProfile, use_predicted: bool = False) -> st
         f"surrounding posts in the same timeline:\n{context_text}\n\n"
         if context_text else ""
     )
+    # 1. Identify the dominant self-state (adaptive or maladaptive) and describe it first.
+    # 2. For each self-state present, highlight the central organizing ABCD aspect — Affect (A), Behavior (B), Cognition (C), or Desire (D) — that drives the state.
+    # 3. Describe how this central aspect influences the other aspects, focusing on causal relationships between them.
+    # 4. If both adaptive and maladaptive states are present, describe each in turn, noting their interplay.
+    # 5. Keep the summary concise (3-6 sentences). Only describe observations fully supported by the text.
 
     prompt = f"""You are a clinical psychology expert analyzing social media posts for mental health dynamics.
 
 Analyze the following social media post and generate a clinical summary of the person's self-states. Follow these guidelines:
 
 1. Identify the dominant self-state (adaptive or maladaptive) and describe it first.
-2. For each self-state present, highlight the central organizing ABCD aspect — Affect (A), Behavior (B), Cognition (C), or Desire (D) — that drives the state.
-3. Describe how this central aspect influences the other aspects, focusing on causal relationships between them.
-4. If both adaptive and maladaptive states are present, describe each in turn, noting their interplay.
-5. Keep the summary concise (3-6 sentences). Only describe observations fully supported by the text.
+2. Describe how this central aspect influences the other aspects, focusing on causal relationships between them.
+3. If both adaptive and maladaptive states are present, describe each in turn, noting their interplay.
+4. Keep the summary concise (3-6 sentences). Only describe observations fully supported by the text.
 
 {context_block}Post to summarize:
 "{post.post_text}"
@@ -616,15 +710,20 @@ def build_one_shot_prompt(
         if tgt_context else ""
     )
 
+    # 1. Identify the dominant self-state (adaptive or maladaptive) and describe it first.
+    # 2. For each self-state, highlight the central organizing ABCD aspect — Affect (A), Behavior (B), Cognition (C), or Desire (D) — that drives the state.
+    # 3. Describe how this central aspect influences the other aspects, focusing on causal relationships.
+    # 4. If both states are present, describe each in turn, noting their interplay.
+    # 5. Keep the summary concise (3-6 sentences). Only describe observations fully supported by the text.
+
     prompt = f"""You are a clinical psychology expert analyzing social media posts for mental health dynamics.
 
 For each post, generate a clinical summary capturing the interplay between adaptive and maladaptive self-states. Follow these guidelines:
 
 1. Identify the dominant self-state (adaptive or maladaptive) and describe it first.
-2. For each self-state, highlight the central organizing ABCD aspect — Affect (A), Behavior (B), Cognition (C), or Desire (D) — that drives the state.
-3. Describe how this central aspect influences the other aspects, focusing on causal relationships.
-4. If both states are present, describe each in turn, noting their interplay.
-5. Keep the summary concise (3-6 sentences). Only describe observations fully supported by the text.
+2. Describe how this central aspect influences the other aspects, focusing on causal relationships.
+3. If both states are present, describe each in turn, noting their interplay.
+4. Keep the summary concise (3-6 sentences). Only describe observations fully supported by the text.
 
 Here is an example:
 
@@ -849,6 +948,9 @@ def main():
     parser.add_argument("--context_window", type=int, default=2,
                         help="Number of surrounding posts (before and after) to "
                              "include from the same timeline as prompt context. 0 disables.")
+    parser.add_argument("--a3_no_context", action="store_true",
+                        help="Disable post/timeline context in Task A.3 prompts. "
+                             "Classifies spans from text alone (for A/B comparison).")
     parser.add_argument("--verbose", action="store_true", default=True,
                         help="Print detailed progress")
 
