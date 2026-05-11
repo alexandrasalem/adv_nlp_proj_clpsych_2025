@@ -12,19 +12,22 @@ with this script or the data. The data sharing agreement prohibits sending
 data to third-party LLM providers.
 
 NOTE: Teammate has a 4080 super to run locally, testing can be done by @danwein8
+
+Usage:
+python pipeline.py --data_dir <data_directory> --output_dir <output_directory> --retrieval_mode <mode> --alpha <float between 0-1>
 """
 
 import json
 import os
 import argparse
 import datetime
+import numpy as np
 from pathlib import Path
 from dataclasses import dataclass, field
-
-import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 
 from llama_cpp import Llama
+from sentence_transformers import SentenceTransformer
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
@@ -33,6 +36,7 @@ _LLAMA_FILENAME = "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"
 
 ABCD_KEYS = ["A", "B-O", "B-S", "C-O", "C-S", "D"]
 STATE_TYPES = ["adaptive-state", "maladaptive-state"]
+RETRIEVAL_MODE = ["structural", "semantic", "hybrid", "hybrid_concat"]
 
 # 12-dimensional profile: 6 ABCD elements x 2 polarities (adaptive, maladaptive)
 PROFILE_DIM_LABELS = [
@@ -112,9 +116,17 @@ class PostProfile:
     # Surrounding posts in the same timeline, used as prompt context.
     # List of dicts: {"post_index": int, "post_text": str, "position": "before"|"after"}
     context_posts: list = field(default_factory=list)
+    semantic_vector: np.ndarray = None
+    hybrid_vector: np.ndarray = None
 
 
 # ── Data Loading ─────────────────────────────────────────────────────────────
+
+def _unit_interval(s):
+    x = float(s)
+    if not 0.0 <= x <= 1.0:
+        raise argparse.ArgumentTypeError(f"alpha must be in [0, 1], got {x}")
+    return x
 
 def load_timelines(data_dir: str) -> list[dict]:
     """Load all timeline JSON files from a directory."""
@@ -140,9 +152,12 @@ def load_timelines(data_dir: str) -> list[dict]:
 def extract_posts(
     timelines: list[dict],
     context_window: int = 1,
+    embedding_model: str = 'sentence-transformers/all-mpnet-base-v2',
 ) -> list[PostProfile]:
     """
     Extract every post in every timeline into PostProfile objects.
+    Also embed and normalize the post text, then add it to PostProfile as
+    the semantic_vector for retrieval.
 
     Annotated posts (those with `Post Summary` or `Well-being` set) get
     `is_annotated=True` and their evidence spans parsed. Unannotated posts
@@ -154,6 +169,9 @@ def extract_posts(
     the same timeline (ordered by `post_index`). Context posts can be either
     annotated or unannotated.
     """
+    model = SentenceTransformer(embedding_model)
+    # instruction = query_instruction_for_retrieval
+    # model2 = SentenceTransformer('BAAI/bge-large-en')
     posts = []
     for tl in timelines:
         tl_id = tl.get("timeline_id", "unknown")
@@ -197,6 +215,11 @@ def extract_posts(
                 evidence_spans=spans,
                 is_annotated=is_annotated,
             ))
+    # get text embeddings
+    embeddings = model.encode([p.post_text for p in posts], normalize_embeddings=True)
+    # iterate through both posts and vectors then assign
+    for post, vec in zip(posts, embeddings):
+        post.semantic_vector = vec
 
     # Attach surrounding-context posts within each timeline.
     by_timeline: dict[str, list[PostProfile]] = {}
@@ -517,55 +540,141 @@ def build_structural_profile(post: PostProfile, use_predicted: bool = False) -> 
     adaptive_ratio = n_adaptive / n_total if n_total > 0 else 0.5
 
     full_vector = np.append(profile, [wb_norm, adaptive_ratio])
-    return full_vector
+    # L2-normalize the full vector here before concatenation
+    full_vector_norm = full_vector / np.linalg.norm(full_vector)
+    return full_vector_norm
 
 
-def build_all_profiles(posts: list[PostProfile], use_predicted: bool = False):
+def build_all_profiles(posts: list[PostProfile], use_predicted: bool = False, alpha: float = 0.5):
     """Build structural profile vectors for all posts."""
     for post in posts:
         post.structural_vector = build_structural_profile(post, use_predicted)
+        post.hybrid_vector = build_hybrid_profile(post, alpha)
 
-    print(f"Built structural profiles for {len(posts)} posts "
-          f"(vector dim: {posts[0].structural_vector.shape[0] if posts else 0})")
+    print(f"Built hybrid and structural profiles for {len(posts)} posts "
+          f"(Hybrid vector dim: {posts[0].hybrid_vector.shape[0] if posts else 0})"
+          f"(Structural vector dim: {posts[0].structural_vector.shape[0] if posts else 0})")
+    
+# ── Full Retrieval Profile Construction ──────────────────────────────────────
 
+def build_hybrid_profile(post: PostProfile, alpha: float = 0.5) -> np.ndarray:
+    """
+    Build the hybrid structural/semantic retrieval vector for all posts
+    
+    alpha: weight to determine how much structural or semantic embedding should matter
+           alpha = 0 (pure semantic retrieval) alpha = 1 (pure structural retrieval)
+    """
+    structural = alpha * post.structural_vector
+    semantic = (1 - alpha) * post.semantic_vector
+    hybrid_vector = np.concatenate((structural, semantic))
+    return hybrid_vector
 
 # ── Retrieval ────────────────────────────────────────────────────────────────
+
+# Per-mode dispatch: for each retrieval mode, declare which vector attributes
+# must be present on a post and how to compute the similarity vector against
+# a pool of candidates. `alpha` is only used by "hybrid" (score-level blend).
+
+def _sim_single_vector(target, candidates, attr):
+    """Cosine similarity using one vector attribute (works for any single-space mode)."""
+    q = getattr(target, attr).reshape(1, -1)
+    M = np.array([getattr(p, attr) for p in candidates])
+    return cosine_similarity(q, M)[0]
+
+
+def _sim_hybrid_score(target, candidates, alpha):
+    """
+    Score-level hybrid: cosine in structural space and in semantic space
+    independently, then alpha-weighted average. Here `alpha` is interpretable
+    as "share of the final score that comes from structural similarity".
+    """
+    sims_struct = _sim_single_vector(target, candidates, "structural_vector")
+    sims_sem = _sim_single_vector(target, candidates, "semantic_vector")
+    return alpha * sims_struct + (1 - alpha) * sims_sem
+
+
+_RETRIEVAL_DISPATCH = {
+    "structural": {
+        "requires": ["structural_vector"],
+        "sim": lambda t, c, alpha: _sim_single_vector(t, c, "structural_vector"),
+    },
+    "semantic": {
+        "requires": ["semantic_vector"],
+        "sim": lambda t, c, alpha: _sim_single_vector(t, c, "semantic_vector"),
+    },
+    "hybrid": {
+        # Score-level blend (recommended). `alpha` is meaningful: 0.5 = 50/50.
+        "requires": ["structural_vector", "semantic_vector"],
+        "sim": lambda t, c, alpha: _sim_hybrid_score(t, c, alpha),
+    },
+    "hybrid_concat": {
+        # Concatenation blend (the original implementation, kept for
+        # comparison). `alpha` was already baked into `hybrid_vector` at
+        # build time; not used again here.
+        "requires": ["hybrid_vector"],
+        "sim": lambda t, c, alpha: _sim_single_vector(t, c, "hybrid_vector"),
+    },
+}
+
 
 def retrieve_nearest(
     target: PostProfile,
     pool: list[PostProfile],
     k: int = 1,
     exclude_same_timeline: bool = True,
+    retrieval_mode: str = "hybrid",
+    alpha: float = 0.5,
 ) -> list[tuple[PostProfile, float]]:
     """
-    Retrieve the k nearest posts from the pool based on structural profile
-    cosine similarity.
+    Retrieve the k nearest posts from the pool by cosine similarity in the
+    chosen retrieval space.
 
     Args:
         target: The post we want to find a match for.
         pool: The set of candidate posts to retrieve from.
         k: Number of nearest neighbors to return.
         exclude_same_timeline: If True, don't retrieve from the same timeline.
+        retrieval_mode: One of RETRIEVAL_MODE.
+            - "structural": cosine on the 14-dim structural profile only
+            - "semantic": cosine on the post-text sentence embedding only
+            - "hybrid": score-level blend of structural and semantic cosines
+              (alpha weights structural, 1-alpha weights semantic)
+            - "hybrid_concat": cosine on the concatenated alpha-weighted
+              structural+semantic vector built in `build_hybrid_profile`
+        alpha: Blend weight for "hybrid" mode. Ignored otherwise.
 
     Returns:
         List of (PostProfile, similarity_score) tuples, sorted by similarity.
     """
-    if target.structural_vector is None:
-        raise ValueError("Target post has no structural vector. Run build_all_profiles first.")
+    retrieval_mode = retrieval_mode.strip().lower()
+    if retrieval_mode not in _RETRIEVAL_DISPATCH:
+        raise ValueError(
+            f"Invalid retrieval_mode '{retrieval_mode}'. "
+            f"Choose from {list(_RETRIEVAL_DISPATCH)}."
+        )
 
-    # Filter pool
+    spec = _RETRIEVAL_DISPATCH[retrieval_mode]
+    required_attrs = spec["requires"]
+
+    # Validate target has the vectors this mode needs.
+    for attr in required_attrs:
+        if getattr(target, attr, None) is None:
+            raise ValueError(
+                f"Target post is missing '{attr}' (needed for mode "
+                f"'{retrieval_mode}'). Run extract_posts / build_all_profiles first."
+            )
+
+    # Single-pass filter: required vectors present, not the same post,
+    # respects exclude_same_timeline, and has a gold summary (for use as
+    # a demonstration).
     candidates = []
     for p in pool:
-        # must have structural vector profile
-        if p.structural_vector is None:
+        if any(getattr(p, attr, None) is None for attr in required_attrs):
             continue
-        # must be in different timeline if exclude_same_timeline=True
         if exclude_same_timeline and p.timeline_id == target.timeline_id:
             continue
-        # Don't retrieve the exact same post
         if p.timeline_id == target.timeline_id and p.post_index == target.post_index:
             continue
-        # Only retrieve posts that have gold summaries (for use as demonstrations)
         if not p.gold_summary:
             continue
         candidates.append(p)
@@ -573,16 +682,9 @@ def retrieve_nearest(
     if not candidates:
         return []
 
-    # Compute cosine similarities
-    target_vec = target.structural_vector.reshape(1, -1)
-    pool_vecs = np.array([p.structural_vector for p in candidates])
-    similarities = cosine_similarity(target_vec, pool_vecs)[0]
-
-    # Sort by similarity (descending) and take top k
+    similarities = spec["sim"](target, candidates, alpha)
     top_indices = np.argsort(similarities)[::-1][:k]
-    results = [(candidates[i], float(similarities[i])) for i in top_indices]
-
-    return results
+    return [(candidates[i], float(similarities[i])) for i in top_indices]
 
 
 # ── Task B: Post-Level Summarization ─────────────────────────────────────────
@@ -761,6 +863,8 @@ def run_task_b(
     retrieval_pool: list[PostProfile],
     use_predicted: bool = False,
     output_dir: str = "./outputs",
+    retrieval_mode: str = "hybrid",
+    alpha: float = 0.5
 ):
     """
     Run Task B summarization in both zero-shot and one-shot modes.
@@ -802,7 +906,7 @@ def run_task_b(
 
         # ── One-shot with structural retrieval ──
         retrieved = retrieve_nearest(
-            post, retrieval_pool, k=1, exclude_same_timeline=True
+            post, retrieval_pool, k=1, exclude_same_timeline=True, retrieval_mode=retrieval_mode, alpha=alpha,
         )
         if retrieved:
             example, sim_score = retrieved[0]
@@ -883,6 +987,8 @@ def run_cross_validation(
     posts: list[PostProfile],
     use_predicted: bool = False,
     output_dir: str = "./outputs",
+    retrieval_mode: str = "hybrid",
+    alpha: float = 0.5
 ):
     """
     Run leave-one-timeline-out cross-validation for Task B.
@@ -913,6 +1019,8 @@ def run_cross_validation(
             llm, target_posts, pool_posts,
             use_predicted=use_predicted,
             output_dir=output_dir,
+            retrieval_mode=retrieval_mode,
+            alpha=alpha,
         )
         all_results.extend(tl_results)
 
@@ -939,6 +1047,12 @@ def main():
                         help="Path to local .gguf model file (downloads from HF if not set)")
     parser.add_argument("--n_ctx", type=int, default=16384,
                         help="Context window size for the model")
+    parser.add_argument("--embedding_model", type=str, default="sentence-transformers/all-mpnet-base-v2",
+                        help="Name of the embedding model to use from sentence_transformers, default uses all-mpnet-base-v2")
+    parser.add_argument("--retrieval_mode", type=str, default="hybrid",
+                        help="Retrieval mode to use, \"semantic\" is pure post text semantic retrieval, \"structural\" uses the structural vector, \"hybrid\" uses a weighted combination and is the default")
+    parser.add_argument("--alpha", type=_unit_interval, default=0.5,
+                        help="weighting for the hybrid retrieval vector, 0.5 is the default and does equal weighting, 0 is pure semantic, 1 is pure structural")
     parser.add_argument("--n_gpu_layers", type=int, default=-1,
                         help="GPU layers to offload (-1 = all)")
     parser.add_argument("--skip_a3", action="store_true",
@@ -957,9 +1071,11 @@ def main():
     args = parser.parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
 
+    
+
     # ── Load data ──
     timelines = load_timelines(args.data_dir)
-    posts = extract_posts(timelines, context_window=args.context_window)
+    posts = extract_posts(timelines, context_window=args.context_window, embedding_model=args.embedding_model)
 
     annotated_posts = [p for p in posts if p.evidence_spans and p.gold_summary]
     print(f"Posts with both evidence and summaries: {len(annotated_posts)}")
@@ -999,7 +1115,7 @@ def main():
         print(f"Saved A.3 predictions to {a3_path}")
 
     # ── Build structural profiles ──
-    build_all_profiles(annotated_posts, use_predicted=use_predicted)
+    build_all_profiles(annotated_posts, use_predicted=use_predicted, alpha=args.alpha)
     print_retrieval_analysis(annotated_posts)
 
     # ── Task B: Summarization ──
@@ -1008,6 +1124,8 @@ def main():
             llm, annotated_posts,
             use_predicted=use_predicted,
             output_dir=args.output_dir,
+            retrieval_mode=args.retrieval_mode,
+            alpha=args.alpha
         )
     else:
         # Simple mode: use all posts as both targets and retrieval pool
@@ -1016,6 +1134,8 @@ def main():
             llm, annotated_posts, annotated_posts,
             use_predicted=use_predicted,
             output_dir=args.output_dir,
+            retrieval_mode=args.retrieval_mode,
+            alpha=args.alpha
         )
 
     print("\n" + "=" * 60)

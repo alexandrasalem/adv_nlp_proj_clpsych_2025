@@ -25,6 +25,10 @@ Usage:
     # Task A.3 from pipeline.py output
     a3 = evaluator.evaluate_task_a3("./outputs/task_a3_predictions.json")
 
+    or CLI:
+    python evaluation.py --task a3 --results <output_file>  
+    python evaluation.py --task b --results <output_file> --mode <zero_shot, one_shot, both>
+
     # Task B from pipeline.py output
     b = evaluator.evaluate_pipeline_output(
         "./outputs/task_b_results.json", mode="both"

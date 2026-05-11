@@ -8,7 +8,7 @@ It was built with Python 3.13. Install requirements with `pip install -r require
 
 It contains the following scripts:
 * `prepare_data.py` — saves the source data to CSVs.
-* `pipeline.py` — runs the structural retrieval-augmented summarization pipeline. Generates predictions only; no metrics.
+* `pipeline.py` — runs the structural, semantic, hybrid, and concatenation retrieval-augmented summarization pipeline. Generates predictions only; no metrics.
     1. Task A.3 — ABCD classification of gold evidence spans
     2. Structural profile construction (12-dim + wellbeing + ratio)
     3. Cosine similarity retrieval for in-context example selection
@@ -54,7 +54,7 @@ The workflow is two-step: `pipeline.py` produces predictions, `evaluation.py` sc
 ### Step 1 — run the pipeline
 
 ```
-python pipeline.py --data_dir /path/to/json/files --output_dir ./outputs
+python pipeline.py --data_dir /path/to/json/files --output_dir ./outputs --retrieval_mode hybrid/structural/semantic/hybrid_concat --alpha 0.5
 ```
 
 This writes:
