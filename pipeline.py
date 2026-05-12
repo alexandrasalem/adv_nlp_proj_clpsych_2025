@@ -1,4 +1,16 @@
 """
+- similarity levels separately then use alpha to combine the weight after you have the 2 scores (not to combine the vectors)
+- Do classification
+- Try a version of classification without whole post also without span and just highlighted post?
+- Bigger model?
+- Run task b prompt without structural evidence as baseline
+- is there something we can do to make the structural data add more to the performance?
+- also use predicted labels
+- Non quantized models?
+- ablation tests
+- larger context window
+"""
+"""
 CLPsych 2025 Pipeline: Structural Retrieval-Augmented Summarization
 
 Pipeline:
@@ -49,38 +61,92 @@ ABCD_DEFINITIONS = {
     "A": {
         "name": "Affect",
         "description": "The type of emotion expressed by the person.",
-        "adaptive_examples": "Calm or Laid back, Healthy Emotional Pain or Grieving, Content or Happy, Vigor or Energetic (calm energy not agitated), Justifiable Anger or Assertive Anger, Proud, Joy, Hopeful",
-        "maladaptive_examples": "Anxious or Tense or Fearful, Depressed or Desperate or Hopeless, Mania, Apathetic or Don't care or Blunted, Angry (Aggressive, Disgust, Contempt), Ashamed or Guilty",
+        # Base
+        "adaptive_examples": "Hopefulness, Confidence Boost, Sadness, Hurt, Happiness, Hope, Excitement, Empowerment, Calm or Laid back, Healthy Emotional Pain or Grieving, Content or Happy, Vigor or Energetic (calm energy not agitated), Justifiable Anger or Assertive Anger, Proud, Joy",
+        "maladaptive_examples": "Anxiety, Despair, Depression, Suicidal Ideation, Social Isolation, Emotional Numbness, Guilt, Frustration, Desperation, Fear, Hopelessness, Loneliness, Shame, Disgust, Social Anxiety, Worthlessness, Tense, Depressed, Desperate, Mania, Apathetic or Don't care, Aggressive Anger, Contempt Anger, Ashamed",
+        
+        # Showed up once
+        # "adaptive_examples": "Hopefulness, Confidence Boost, Sadness, Hurt, Happiness, Hope, Excitement, Empowerment, Calm or Laid back, Healthy Emotional Pain or Grieving, Content, Happy, Vigor or Energetic (calm energy not agitated), Justifiable Anger, Assertive Anger, Proud, Joy, Motivation, Frustration, Nostalgia, Amazement, Normalcy, Relief, Resilience, Heartbreak, Disappointment",
+        # "maladaptive_examples": "Anxiety, Despair, Depression, Suicidal Ideation, Social Isolation, Emotional Numbness, Guilt, Frustration, Desperation, Fear, Hopelessness, Loneliness, Shame, Disgust, Social Anxiety, Worthlessness, Tense, Depressed, Desperate, Mania, Apathetic or Don't care, Aggressive Anger, Contempt Anger, Ashamed, Emotional Breakdown, Burnout, Despondency, Emotional Pain, Panic, Overwhelm, Exhaustion",
+        
+        # Kitchen Sink
+        # "adaptive_examples": "Hopefulness, Confidence Boost, Sadness, Hurt, Happiness, Hope, Excitement, Empowerment, Calm or Laid back, Healthy Emotional Pain or Grieving, Content or Happy, Vigor or Energetic (calm energy not agitated), Justifiable Anger or Assertive Anger, Proud, Joy, Emotional Connection, Motivation, Nostalgia, Relief, Gratitude, Pride, Anger, Frustration, Disappointment, Anxiousness, Fear, Resilience, Self-Improvement, Optimism, Joy, Sorrow, Longing, Appreciation, Satisfaction, Anticipation, Elation, Despair, Desperation, Guilt, Shame, Regret, Acceptance, Closure, Renewal, Inspiration, Courage, Determination, Perseverance, Faith, Trust, Love, Affection, Affirmation, Validation, Empathy, Compassion, Sympathy, Understanding, Acceptance, Forgiveness, Letting Go, Moving On, Growth, Progress, Self-Care, Self-Love, Self-Acceptance, Self-Validation, Self-Compassion",
+        # "maladaptive_examples": "Anxiety, Despair, Depression, Suicidal Ideation, Social Isolation, Emotional Numbness, Guilt, Frustration, Desperation, Fear, Hopelessness, Loneliness, Shame, Disgust, Social Anxiety, Worthlessness, Tense, Depressed, Desperate, Mania, Apathetic or Don't care, Aggressive Anger, Contempt Anger, Ashamed, Frustration, Helplessness, Panic, Irritability, Self-Hatred, Apathy, Despair, Overwhelm, Exhaustion, Self-Doubt, Insecurity, Shyness, Avoidance, Negative Thoughts, Self-Criticism, Self-Destructive Behavior, Emotional Dysregulation, Trauma, PTSD, Anxiety Disorder, Depression Disorder, Suicidal Behavior, Self-Harm, Emotional Pain, Mental Health Struggle, Emotional Turmoil, Inner Turmoil, Mental Breakdown, Emotional Breakdown, Crisis, Distress",
     },
     "B-O": {
         "name": "Behavior toward the Other",
         "description": "The person's main behavior(s) toward the other.",
-        "adaptive_examples": "Relating behavior, Connecting or communicating with the other, expressing care, listening, sharing feelings, Allowing autonomous behavior",
-        "maladaptive_examples": "Fight or flight behavior, Controlling or Dominating behavior, Overcontrolled around other",
+        # Base
+        "adaptive_examples": "Requesting-Advice, Expressing-Emotions, Reaching-Out-for-Support, Sharing-Experiences, Sharing-Struggles, Seeking-Professional-Help, Seeking-Advice, Relating behavior, Connecting or communicating with the other, expressing care, listening, sharing feelings, Allowing autonomous behavior",
+        "maladaptive_examples": "Avoidant Communication, Social Isolation, Aggressive Deflection, Fear of Abandonment, Avoidant Attachment, Fear of Vulnerability, Fight or flight behavior, Controlling or Dominating behavior, Overcontrolled around other",
+        
+        # Showed up once
+        # "adaptive_examples": "Requesting-Advice, Expressing-Emotions, Reaching-Out-for-Support, Sharing-Experiences, Sharing-Struggles, Seeking-Professional-Help, Seeking-Advice, Relating behavior, Connecting or communicating with the other, expressing care, listening, sharing feelings, Allowing autonomous behavior, Asking-for-Encouragement, Seeking-Advice-on-Parenting, Seeking-Validation, Asking-for-Feedback",
+        # "maladaptive_examples": "Avoidant Communication, Social Isolation, Aggressive Deflection, Fear of Abandonment, Avoidant Attachment, Fear of Vulnerability, Fight or flight behavior, Controlling or Dominating behavior, Overcontrolled around other, Social Anxiety, Self-Blame and Shame",
+        
+        # Kitchen Sink
+        # "adaptive_examples": "Requesting-Advice, Expressing-Emotions, Reaching-Out-for-Support, Sharing-Experiences, Sharing-Struggles, Seeking-Professional-Help, Seeking-Advice, Relating behavior, Connecting or communicating with the other, expressing care, listening, sharing feelings, Allowing autonomous behavior, Asking-for-Validation, Seeking-Companionship, Seeking-Advice-on-Relationships, Seeking-Advice-on-Health, Seeking-Advice-on-Emotional-Wellbeing, Seeking-Advice-on-Intimacy, Seeking-Advice-on-Self-Improvement, Seeking-Advice-on-Relationship-Dynamics, Seeking-Advice-on-Child-Development, Seeking-Advice-on-Communication, Seeking-Advice-on-Conflict-Resolution, Seeking-Advice-on-Emotional-Intelligence, Seeking-Advice-on-Relationship-Goals, Seeking-Advice-on-Intimacy-Goals, Seeking-Advice-on-Emotional-Wellbeing-Goals",
+        # "maladaptive_examples": "Avoidant Communication, Social Isolation, Aggressive Deflection, Fear of Abandonment, Avoidant Attachment, Fear of Vulnerability, Fight or flight behavior, Controlling or Dominating behavior, Overcontrolled around other, Emotional Inexpressibility, Self-Blame and Shame, Social Anxiety, Passive-Aggressive Behavior, Fear of Intimacy",
     },
     "B-S": {
         "name": "Behavior toward the Self",
         "description": "The person's main behavior(s) toward the self.",
-        "adaptive_examples": "Self-care behavior",
-        "maladaptive_examples": "Self-harm or Neglect or Avoidance behavior",
+        # Base
+        "adaptive_examples": "Self-Advocacy, Self-Improvement Plans, Self-Care Strategies, Medication Management, Therapy Progress, Emotional Regulation Techniques, Self-care behavior",
+        "maladaptive_examples": "Self-Neglect, Substance Abuse, Self-Sabotage, Self-Isolation, Avoidance Behaviors, Self-Harm, Suicidal Ideation, Social Withdrawal, Compulsive Eating, Loss of Motivation, Neglect",
+        
+        # Showed up once
+        # "adaptive_examples": "Self-Advocacy, Self-Improvement Plans, Self-Care Strategies, Medication Management, Therapy Progress, Emotional Regulation Techniques, Self-care behavior, Positive Self-Talk",
+        # "maladaptive_examples": "Self-Neglect, Substance Abuse, Self-Sabotage, Self-Isolation, Avoidance Behaviors, Self-Harm, Suicidal Intention or actions, Social Withdrawal, Compulsive Eating, Loss of Motivation, Compulsive Substance Use, Avoidance of Emotions, Compulsive Behavior, Self-Perfectionism, Involuntary Behavior",
+
+        # Kitchen Sink
+        # "adaptive_examples": "Self-Advocacy, Self-Improvement Plans, Self-Care Strategies, Medication Management, Therapy Progress, Emotional Regulation Techniques, Self-care behavior, Healthy Coping Mechanisms, Positive Self-Talk, Relationship Boundaries, Personal Growth",
+        # "maladaptive_examples": "Self-Neglect, Substance Abuse, Self-Sabotage, Self-Isolation, Avoidance Behaviors, Self-Harm, Suicidal Ideation, Social Withdrawal, Compulsive Eating, Loss of Motivation, Neglect, Dissociation, Emotional Suppression, Compulsive Behavior, Impulsivity, Addiction, Dissatisfaction, Escapism, Avoidance of Responsibilities, Avoidance of Emotions, Self-Perfectionism",
     },
     "C-O": {
         "name": "Cognition of the Other",
         "description": "The person's main perceptions of the other.",
-        "adaptive_examples": "Perception of the other as caring attuned or emotionally connected, Perception of the other as facilitating autonomy or competence needs",
-        "maladaptive_examples": "Perception of the other as detached or over attached, Perception of the other as blocking autonomy needs",
+        # Base
+        "adaptive_examples": "Perceptions of Support, Perceptions of Safety, Perceptions of Connection, Perceptions of Love, Perceptions of Understanding, Perceptions of Acceptance, Perception of the other as caring attuned or emotionally connected, Perception of the other as facilitating autonomy or competence needs",
+        "maladaptive_examples": "Manipulative Others, Social Isolation, Feeling Invisible, Feeling Unappreciated, Lack of Empathy, Feeling Disrespected, Abusive Relationships, Feeling Abandoned, Betrayal, Feeling Judged, Feeling Trapped, Feeling Unloved, Perception of the other as detached or over attached, Perception of the other as blocking autonomy needs",
+
+        # Showed up once
+        # "adaptive_examples": "Perceptions of Support, Perceptions of Safety, Perceptions of Connection, Perceptions of Love, Perceptions of Understanding, Perceptions of Acceptance, Perception of the other as caring attuned or emotionally connected, Perception of the other as facilitating autonomy or competence needs, Perceptions of Empathy, Perceptions of Inclusion",
+        # "maladaptive_examples": "Manipulative Others, Social Isolation, Feeling Invisible, Feeling Unappreciated, Lack of Empathy, Feeling Disrespected, Abusive Relationships, Feeling Abandoned, Betrayal, Feeling Judged, Feeling Trapped, Feeling Unloved, Perception of the other as detached or over attached, Perception of the other as blocking autonomy needs, Feeling Like a Freak, Feeling Unheard, Gaslighting, Emotional Neglect, Feeling Like a Burden",
+
+        # Kitchen Sink
+        # "adaptive_examples": "Perceptions of Support, Perceptions of Safety, Perceptions of Connection, Perceptions of Love, Perceptions of Understanding, Perceptions of Acceptance, Perception of the other as caring attuned or emotionally connected, Perception of the other as facilitating autonomy or competence needs, Perceptions of Empathy, Perceptions of Validation, Perceptions of Inclusion, Perceptions of Belonging",
+        # "maladaptive_examples": "Manipulative Others, Social Isolation, Feeling Invisible, Feeling Unappreciated, Lack of Empathy, Feeling Disrespected, Abusive Relationships, Feeling Abandoned, Betrayal, Feeling Judged, Feeling Trapped, Feeling Unloved, Perception of the other as detached or over attached, Perception of the other as blocking autonomy needs, Gaslighting, Emotional Neglect, Feeling Unseen, Feeling Unheard, Feeling Unwanted, Feeling Disrespected, Feeling Disregarded, Feeling Unworthy, Feeling Like a Burden, Feeling Like a Failure, Feeling Like a Freak",
     },
     "C-S": {
         "name": "Cognition of the Self",
         "description": "The person's main self-perceptions.",
-        "adaptive_examples": "Self-acceptance and self-compassion",
-        "maladaptive_examples": "Self-criticism, Self-loathing, sense of worthlessness",
+        # Base
+        "adaptive_examples": "Self-Confidence, Self-Acceptance, Self-Validation, Self-Efficacy, Self-Improvement, Self-Awareness, Self-compassion",
+        "maladaptive_examples": "Self-Blame, Low Self-Esteem, Self-Loathing, Loss of Control, Inadequate, Helplessness, Lack of Self-Worth, Self-Doubt, Invisible, Fear of Failure, Feelings of Inadequacy, Worthlessness, Weak, Pathetic, Unvalued, Unloved, Self-criticism, sense of worthlessness",
+
+        # Showed up once
+        # "adaptive_examples": "Self-Confidence, Self-Acceptance, Self-Validation, Self-Efficacy, Self-Improvement, Self-Awareness, Self-compassion, Independence, Self-Perceived Competence, Self-Worth, Self-Reliance, Self-Reflection, Self-Identity, Self-Recognition, Self-Respect",
+        # "maladaptive_examples": "Self-Blame, Low Self-Esteem, Self-Loathing, Loss of Control, Inadequate, Helplessness, Lack of Self-Worth, Self-Doubt, Invisible, Fear of Failure, Feelings of Inadequacy, Worthlessness, Weak, Pathetic, Unvalued, Unloved, Self-criticism, sense of worthlessness, Self-Disgust, Unremarkable, Shame and Guilt, Broken, Useless, Emotional Dysregulation, Uninteresting, Self-Neglect",
+
+        # Kitchen Sink
+        # "adaptive_examples": "Self-Confidence, Self-Acceptance, Self-Validation, Self-Efficacy, Self-Improvement, Self-Awareness, Self-compassion, Self-Perceived Competence, Personal Growth, Self-Compassion, Resilience, Adaptability, Self-Worth, Emotional Regulation, Independence, Self-Identity, Self-Reflection, Self-Respect, Self-Recognition, Self-Reliance",
+        # "maladaptive_examples": "Self-Blame, Low Self-Esteem, Self-Loathing, Loss of Control, Inadequate, Helplessness, Lack of Self-Worth, Self-Doubt, Invisible, Fear of Failure, Feelings of Inadequacy, Worthlessness, Weak, Pathetic, Unvalued, Unloved, Self-criticism, sense of worthlessness, Shame and Guilt, Emotional Dysregulation, Insecurity, Powerlessness, Self-Disgust, Unremarkable, Broken",
     },
     "D": {
         "name": "Desire",
         "description": "The person's main desire, need, intention, fear or expectation.",
-        "adaptive_examples": "Desire for Relatedness, Desire for Autonomy and adaptive control, Desire for Competence, Need for Self-esteem or worth, Desire for Self-care",
-        "maladaptive_examples": "Expectation that relatedness need will not be met, Expectation that autonomy needs will not be met, Expectation that competence needs will not be met, Fear of abandonment, Fear of failure, Fear of bring controlled",
+        # Base
+        "adaptive_examples": "Desire for Normalcy and Acceptance, Desire for Change and Improvement, Support, Desire for Self-Acceptance and Self-Love, Desire for Happiness and Fulfillment, Desire for Recognition and Validation, Desire for Autonomy and Independence, Desire for Self-Improvement and Growth, Desire for Connection and Intimacy, Seeking Help, Anxiety and Worry, Desire for Relatedness, Desire for Competence, Need for Self-esteem or worth, Desire for Self-care",
+        "maladaptive_examples": "Suicidal ideation, Loss of motivation, Self-harm, Low self-esteem, Self-doubt, Existential crisis, Hopelessness, Fear of abandonment, Social anxiety, Addiction, Depression, Trauma, Expectation that relatedness need will not be met, Expectation that autonomy needs will not be met, Expectation that competence needs will not be met, Fear of failure, Fear of bring controlled",
+
+        # Showed up once
+        # "adaptive_examples": "Desire for Normalcy and Acceptance, Desire for Change and Improvement, Desire for Support, Desire for Self-Acceptance and Self-Love, Desire for Happiness and Fulfillment, Desire for Recognition and Validation, Desire for Autonomy and Independence, Desire for Self-Improvement and Personal Growth and Development, Desire for Connection and Intimacy, Seeking Help, Anxiety and Worry, Desire for Relatedness, Desire for Competence, Need for Self-esteem or worth, Desire for Self-care",
+        # "maladaptive_examples": "Desire for death, Loss of motivation, Self-harm, Low self-esteem, Self-doubt, Existential crisis, Hopelessness, Fear of abandonment, Social anxiety, Addiction, Depression, Trauma, Expectation that relatedness need will not be met, Expectation that autonomy needs will not be met, Expectation that competence needs will not be met, Fear of failure, Fear of bring controlled, Apathy, Despair, Feeling overwhelmed",
+
+        # Kitchen Sink
+        # "adaptive_examples": "Desire for Normalcy and Acceptance, Desire for Change and Improvement, Support, Desire for Self-Acceptance and Self-Love, Desire for Happiness and Fulfillment, Desire for Recognition and Validation, Desire for Autonomy and Independence, Desire for Self-Improvement and Growth, Desire for Connection and Intimacy, Seeking Help, Anxiety and Worry, Desire for Relatedness, Desire for Competence, Need for Self-esteem or worth, Desire for Self-care, Desire for Personal Growth and Development",
+        # "maladaptive_examples": "Suicidal ideation, Loss of motivation, Self-harm, Low self-esteem, Self-doubt, Existential crisis, Hopelessness, Fear of abandonment, Social anxiety, Addiction, Depression, Trauma, Expectation that relatedness need will not be met, Expectation that autonomy needs will not be met, Expectation that competence needs will not be met, Fear of failure, Fear of bring controlled, Apathy, Despair, Feeling overwhelmed",
     },
 }
 
@@ -107,7 +173,7 @@ class PostProfile:
     post_text: str
     wellbeing: float
     gold_summary: str
-    evidence_spans: list        # list of EvidenceSpan
+    evidence_spans: list[EvidenceSpan]        # list of EvidenceSpan
     is_annotated: bool = True   # False for surrounding-context-only posts
     # The 12-dim binary profile + wellbeing + ratio
     structural_vector: np.ndarray = None
@@ -118,6 +184,7 @@ class PostProfile:
     context_posts: list = field(default_factory=list)
     semantic_vector: np.ndarray = None
     hybrid_vector: np.ndarray = None
+    span_semantic_vectors: list[np.ndarray] = None
 
 
 # ── Data Loading ─────────────────────────────────────────────────────────────
@@ -220,6 +287,13 @@ def extract_posts(
     # iterate through both posts and vectors then assign
     for post, vec in zip(posts, embeddings):
         post.semantic_vector = vec
+    for p in posts:
+        if p.evidence_spans:
+            spans = model.encode([span.text for span in p.evidence_spans], normalize_embeddings=True)
+            p.span_semantic_vectors = spans
+        else:
+            p.span_semantic_vectors = []
+
 
     # Attach surrounding-context posts within each timeline.
     by_timeline: dict[str, list[PostProfile]] = {}
@@ -278,7 +352,7 @@ def load_model(model_path: str = None, n_ctx: int = 16384, n_gpu_layers: int = -
     return llm
 
 
-def generate(llm: Llama, prompt: str, max_tokens: int = 256, temperature: float = 0.01) -> str:
+def generate(llm: Llama, prompt: str, max_tokens: int = 16384, temperature: float = 0.01) -> str:
     """Generate a completion from the model using chat format."""
     response = llm.create_chat_completion(
         messages=[{"role": "user", "content": prompt}],
@@ -564,6 +638,7 @@ def build_hybrid_profile(post: PostProfile, alpha: float = 0.5) -> np.ndarray:
     alpha: weight to determine how much structural or semantic embedding should matter
            alpha = 0 (pure semantic retrieval) alpha = 1 (pure structural retrieval)
     """
+    # TODO: find a better way to combine vectors (concat not great?)
     structural = alpha * post.structural_vector
     semantic = (1 - alpha) * post.semantic_vector
     hybrid_vector = np.concatenate((structural, semantic))
@@ -1070,8 +1145,6 @@ def main():
 
     args = parser.parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
-
-    
 
     # ── Load data ──
     timelines = load_timelines(args.data_dir)
