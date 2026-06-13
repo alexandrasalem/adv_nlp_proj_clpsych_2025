@@ -41,14 +41,16 @@ def run_task_c_blue_baseline(post_csv_location):
             timelines[row['timeline_id']].append(row['post'])
 
     summaries = []
-    for timeline in tqdm.tqdm(timelines.items()):
+    timeline_ids = []
+    for timeline_id, timeline in tqdm.tqdm(timelines.items()):
         joined_timeline = "\n\n".join(timeline)
         summary = blue_baseline_timeline(joined_timeline)
         summaries.append(summary)
+        timeline_ids.append(timeline_id)
 
-    data['task_c_baseline_blue_team_summaries'] = summaries
+    output_data = pd.DataFrame({'timeline_id': timeline_ids, 'task_c_baseline_blue_team_summaries': summaries})
     new_csv_name = f'{post_csv_location[:-4]}_task_c_blue_baseline.csv'
-    data.to_csv(new_csv_name, index=False)
+    output_data.to_csv(new_csv_name, index=False)
 
 def single_official_baseline_timeline_summary(all_posts_concatenated, model, tokenizer, device):
     prompt = f"""
@@ -87,6 +89,7 @@ def run_task_c_official_baseline(post_csv_location):
 
     data = pd.read_csv(post_csv_location)
     timelines = {}
+    timeline_ids = []
     for index, row in data.iterrows():
         if row['timeline_id'] not in timelines.keys():
             timelines[row['timeline_id']] = row['post']
@@ -94,14 +97,16 @@ def run_task_c_official_baseline(post_csv_location):
             timelines[row['timeline_id']] = f'{timelines[row['timeline_id']]}\n\n{row['post']}'
 
     summaries = []
-    for timeline in tqdm.tqdm(timelines.items()):
+    timeline_ids = []
+    for timeline_id, timeline in tqdm.tqdm(timelines.items()):
         summary = single_official_baseline_timeline_summary(timeline, model, tokenizer, device)
         summaries.append(summary)
+        timeline_ids.append(timeline_id)
 
-    data['task_c_baseline_official_summaries'] = summaries
+    output_data = pd.DataFrame({'timeline_id': timeline_ids, 'task_c_baseline_official_summaries' : summaries})
     new_csv_name = f'{post_csv_location[:-4]}_task_c_official_baseline.csv'
-    data.to_csv(new_csv_name, index=False)
+    output_data.to_csv(new_csv_name, index=False)
 
 if __name__ == "__main__":
     run_task_c_official_baseline(post_csv_location)
-    run_task_b_blue_baseline(post_csv_location)
+    run_task_c_blue_baseline(post_csv_location)
