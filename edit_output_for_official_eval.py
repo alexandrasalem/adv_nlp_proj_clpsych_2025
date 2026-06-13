@@ -29,7 +29,7 @@ def convert_dan_task_b_res_to_official_eval(results_loc, model_name, output_loc)
         added_post_dict = {post_index: False for post_index in timeline_post_ids}
 
         new_output[timeline] = {"timeline_level": {"summary": ""}, "post_level": {}}
-        with open(results_loc, "r") as f:
+        with open(results_loc, "r", encoding="utf-8") as f:
             data = json.load(f)
             for post in data:
                 timeline_id = post['timeline_id']
@@ -41,6 +41,10 @@ def convert_dan_task_b_res_to_official_eval(results_loc, model_name, output_loc)
                 post_output_template = {'adaptive_evidence': [], 'maladaptive_evidence': [], 'summary': '',
                                         'wellbeing_score': None}
                 post_output_template['summary'] = post[model_name]
+                # Populate evidence so run.py computes the Evidence Alignment metric.
+                # run.py concatenates adaptive + maladaptive for Task B, so putting all
+                # spans in adaptive_evidence is equivalent for Task B scoring.
+                post_output_template['adaptive_evidence'] = post.get('evidence_texts', [])
                 new_output[timeline_id]['post_level'][post_id] = post_output_template
                 added_post_dict[post_id] = True
             for post_id, added in added_post_dict.items():
@@ -77,7 +81,7 @@ def convert_alex_task_b_res_to_official_eval(results_loc, model_name, output_loc
 
 def convert_tamoghna_task_c_res_to_official_eval(results_loc, output_loc):
     new_output = {}
-    with open(results_loc, "r") as f:
+    with open(results_loc, "r", encoding="utf-8") as f:
         data = json.load(f)
     for predicted_timeline in data:
         timeline_id = predicted_timeline['timeline_id']

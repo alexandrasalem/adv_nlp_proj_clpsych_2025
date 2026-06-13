@@ -1,2 +1,4 @@
 .venv
 outputs/
+clpsych2025/
+__pycache__/
