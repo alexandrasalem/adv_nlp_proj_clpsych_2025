@@ -181,7 +181,10 @@ def load_source(spec: str) -> tuple[str, list[tuple]]:
     else:
         raise SystemExit(f"{path}: unsupported extension {ext!r} (use .json or .csv).")
 
-    print(f"  loaded {len(rows):4d} summaries for system '{name}' (field={field})")
+    n_nonempty = sum(1 for _, s in rows if s and s.strip())
+    flag = "  <-- ALL EMPTY (check field/column)" if rows and n_nonempty == 0 else ""
+    print(f"  loaded {len(rows):4d} summaries for system '{name}' "
+          f"(field={field}, {n_nonempty} non-empty){flag}")
     return name, rows
 
 
@@ -337,6 +340,20 @@ def main():
 
     # Pool every summary to compute corpus-relative statistics (IDF, bigram DF).
     all_texts = [text for _, rows in sources for _, text in rows]
+    total_nonempty = sum(1 for t in all_texts if t and t.strip())
+    if total_nonempty < 2:
+        empty_sources = [name for name, rows in sources
+                         if not any(t and t.strip() for _, t in rows)]
+        raise SystemExit(
+            f"\nERROR: only {total_nonempty} non-empty summaries across all sources, so the "
+            f"corpus statistics (IDF, bigram frequencies) are undefined and every metric "
+            f"would be NaN.\nSources with no non-empty summaries: {empty_sources}\n"
+            f"This usually means the --source field/column is wrong, or a wide CSV is "
+            f"misaligned (mostly NaN cells from an index-mismatched concat).\n"
+            f"Tip: point each --source at a per-run output file directly rather than a "
+            f"hand-assembled wide CSV, e.g.\n"
+            f'  --source "gold_a0.25=outputs/task_b_results_gold_hybrid-a0.25_<ts>.json#one_shot_summary"'
+        )
     idf, default_idf, bg_df, n_docs = build_corpus_stats(all_texts)
     print(f"\nPooled corpus: {len(all_texts)} summaries, {n_docs} non-empty "
           f"(IDF + bigram stats computed over the pool).")
