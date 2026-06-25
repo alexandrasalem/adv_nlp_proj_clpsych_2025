@@ -7,3 +7,5 @@ numpy
 scikit-learn
 sentence_transformers
 matplotlib
+scipy
+python-dateutil
