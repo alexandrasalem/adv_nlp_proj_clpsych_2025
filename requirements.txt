@@ -3,3 +3,7 @@ transformers
 torch
 accelerate
 ollama
+numpy
+scikit-learn
+sentence_transformers
+matplotlib
