@@ -1,0 +1,46 @@
+Prompt for LLM-as-a-judge and human annotators:
+
+You are an expert clinical psychologist. Your task is to evaluate an LLM-generated summary of a Reddit post that describes the interplay between adaptive and maladaptive self-states that occur in it. The summary should identify the dominant self-state, and describe how core aspects of it influence the rest.
+
+The summary should describe the post author's self-state using the ABCD framework:
+A (Affect): emotions and feelings
+B (Behavior): actions and conduct toward self or others
+C (Cognition): thoughts, beliefs, and perceptions about self or others
+D (Desire/Need): psychological needs and motivations
+
+A self-state is defined as:
+Adaptive: positive emotions, behaviors, or thoughts that support the author's psychological needs 
+Maladaptive: negative emotions, behaviors, or thoughts that hinder the author's psychological needs
+
+Read the following Reddit post: <post>
+Read the following gold standard summary of this post: <gold>
+Read the following LLM-generated summary of this post: <LLM-generated>
+
+Answer the following questions:
+How would you rate the overall quality of the LLM-generated summary, in comparison to the gold standard summary?
+Rate 1-5: 1) Poor, 2) Below Average, 3) Average, 4) Good, 5) Excellent
+How would you rate the statement “the LLM-generated summary contains no contradictory information when compared with the gold standard summary”?
+Rate 1-5: 1) Strongly disagree, 2) Disagree, 3) Neutral, 4) Agree, 5) Strongly agree
+How would you rate the statement “the LLM-generated summary covers all the same information that is in the gold standard summary”?
+Rate 1-5: 1) Strongly disagree, 2) Disagree, 3) Neutral, 4) Agree, 5) Strongly agree
+
+Define quality: Quality considers both contradiction and coverage in relation to the gold standard in assessing the overall usefulness of the summary as a clinical description of the author’s self-state(s). Good-quality summaries should not only effectively reference the information in the post, but should also clearly reference and define which self-states are present.
+A rating of 5 means that the summary contains no contradictions and describes the same self-states as the gold standard.
+A rating of 4 means that the summary contains no contradictions and covers most of the same information as the gold standard.
+A rating of 3 means that the summary may contain mild contradictions but generally discusses the same self-states as the gold standard.
+A rating of 2 means that there may be notable contradictions and/or the summary does not reference the proper self-states.
+A rating of 1 means that there are severe contradictions and/or contains no informative or correct reference to self-states.
+
+Define contradiction: A contradiction is a statement in a summary that directly contradicts a statement from the gold standard. 
+A rating of 5 means there is no information in the generated summary that contradicts the gold standard.
+A rating of 4 means there is almost no information in the generated summary that contradicts the gold standard, and if there is, it is a detail that does not impede the overall description of self-states.
+A rating of 3 means that there is information in the generated summary that is contradictory with the gold standard, but the overall summary is still consistent and clinically useful.
+A rating of 2 means that there is a notable contradiction present hindering the usefulness of the summary.
+A rating of 1 means there is a severe contradiction present.
+
+Define covering same information: A generated summary covers the same information as the gold standard summary if the same self-states are identified, with the same adaptive/maladaptive label, and the same evidence or examples from the post for the self-states are identified. 
+A rating of 5 means almost exactly the same self-states and evidence were found. 
+A rating of 4 means there are some small differences in the self-states and evidence found. 
+A rating of 3 means some of the self-states or evidence overlapped but others were different. 
+A rating of 2 means most of the self-states or evidence was different, or limited reference to self-states was given.
+A rating of 1 means entirely different self-states and evidence were given, or no references to self-states were made.

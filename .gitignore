@@ -2,3 +2,27 @@
 outputs/
 clpsych2025/
 __pycache__/
+glm_claude.ps1
+local_claude.ps1
+body.json
+Modelfile
+CLAUDE.md
+ABCD Fidelity — Human Evaluation Prompt & Automated Metric Spec.docx
+AGENTS.md
+EXAMPLE_DATA.json
+PROJECT_CONTEXT.md
+pref_sheets/
+Rater1_pref_sheets/
+rHuman_evals/
+rHuman_Evals_main/
+AllSummaries.csv
+claims_and_evidence.md
+evaluation.md
+human_rankings_instance_template.csv
+human_rankings_template.csv
+human_rankings.csv
+official_scores.csv
+opencode.json
+post_data.csv
+remaining_work_todo.md
+run_official_eval_sweep.ps1

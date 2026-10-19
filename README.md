@@ -138,6 +138,14 @@ Human rankings are not part of this repo — supply them in a file
 ranked systems, plus one or more human judgment columns). Use `--human_kind rank`
 if those columns are ranks (1 = best) rather than scores.
 
+Multiple annotators are handled: pass several files to `--human` (e.g. one per
+annotator) and rows for the same system/summary are **averaged to the consensus**
+before correlating — so a per-summary (system, post) rated by 3–4 annotators
+contributes one consensus value, and the instance-level `n` is the number of
+summaries, not summaries × annotators. (Whether annotators are in separate files
+or stacked in one file with a non-numeric annotator column, both work; avoid a
+*numeric* annotator-id column, which would look like a rating.)
+
 ```
 # Rank the repo's own conditions (incl. EAIonFlux + baselines) from local eval output
 python rank_correlation.py --level conditions --task B \
@@ -152,7 +160,21 @@ python rank_correlation.py --level teams \
 python rank_correlation.py --level instances --task B --instance_key post_id \
     --results clpsych2025/evaluation/results/results_dev_<ts>.csv \
     --human my_per_summary_human.csv
+
+# Humans annotated only a subset (e.g. 30 posts/system): restrict metrics to that
+# subset (MSLR-faithful) AND get the pooled instance-level rho in one run
+python rank_correlation.py --level conditions --task B --restrict_to_human \
+    --results clpsych2025/evaluation/results/results_dev_<ts>.csv \
+    --human my_per_summary_human.csv --heatmap
 ```
+
+When humans rated only some posts, averaging a metric over *all* generated summaries
+but humans over the *subset* is not a fair comparison. `--restrict_to_human` (with a
+per-summary `--human` file) inner-joins the metrics to the annotated summaries — so the
+metric means are computed over exactly the human-rated posts — aggregates both metrics
+and human ratings to system means over that subset, and additionally prints the pooled
+instance-level ρ from the same data. One command yields both the (descriptive, small-n)
+system-level ranks table and the (powered, many-summary) instance-level correlation.
 
 `--level instances` is the powered companion to the system-level result (which, with
 only a handful of systems, is descriptive at best). It joins each summary's
