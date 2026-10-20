@@ -26,3 +26,7 @@ opencode.json
 post_data.csv
 remaining_work_todo.md
 run_official_eval_sweep.ps1
+# Cloned reference repos (kept local + untracked; source of the CLPsych 2026
+# evaluation logic and the BULUSI system code)
+CLPsych-2026/
+BULUSI-CLPsych/

@@ -9,3 +9,6 @@ sentence_transformers
 matplotlib
 scipy
 python-dateutil
+nltk
+bert-score
+rouge-score

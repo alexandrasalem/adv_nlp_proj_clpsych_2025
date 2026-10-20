@@ -21,8 +21,11 @@ The EAIonFlux system is a retrieval-augmented In-Context Learning (ICL) pipeline
       demonstrations, and are sent to a locally-served LLM via Ollama.
 
 Faithful-but-configurable choices (see the project README):
-    * Generation model is an Ollama model chosen with --model. The paper used
-      `llama3.3:70b`; the default here (`llama3.1:8b`) runs on a single 16 GB GPU.
+    * Generation model defaults to the paper's `llama3.3:70b`. With
+      --backend ollama (local single-GPU smoke runs) any smaller Ollama model
+      can be substituted via --model (e.g. llama3.1:8b); on the cluster use
+      --backend vllm --model /path/to/local/Llama-3.3-70B-Instruct, which
+      loads local weights with tensor parallelism across GPUs.
     * The embedding model is any sentence-transformers id chosen with
       --embedding_model. The paper used `Linq-AI-Research/Linq-Embed-Mistral`;
       the default here is the lighter `sentence-transformers/all-mpnet-base-v2`
@@ -30,6 +33,12 @@ Faithful-but-configurable choices (see the project README):
     * Retrieval is exact top-k cosine similarity. The paper used ChromaDB/HNSW
       approximate nearest-neighbour search; at this dataset's scale exact cosine
       returns the same neighbours.
+
+Resumability: per-post (Task B) / per-timeline (Task C) results are appended to
+a JSONL checkpoint after every generation and skipped on restart. Official
+submission-format JSONs (gold evidence + gold well-being filled in, dev.json
+structure) are rewritten after every checkpoint write, so partial runs stay
+scorable and reruns cost only the missing generations.
 
 Like the rest of this repository, Tasks A.1/A.2 are NOT performed: the gold
 evidence spans and gold well-being scores are used as the "Task A outputs" that
@@ -69,6 +78,11 @@ from pathlib import Path
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 
+from system_utils import (
+    Checkpoint, write_task_b_submission, write_task_c_submission,
+    write_settings_log, VLLMBackend, MockBackend,
+)
+
 # ── Configuration ────────────────────────────────────────────────────────────
 
 ABCD_KEYS = ["A", "B-O", "B-S", "C-O", "C-S", "D"]
@@ -85,8 +99,8 @@ ABCD_NAMES = {
 }
 
 # Paper defaults: generation = llama3.3:70b, embedding = Linq-Embed-Mistral.
-# Runnable defaults here (override on the CLI to match the paper exactly):
-DEFAULT_OLLAMA_MODEL = "llama3.1:8b"
+DEFAULT_OLLAMA_MODEL = "llama3.3:70b"
+DEFAULT_VLLM_MODEL = "meta-llama/Llama-3.3-70B-Instruct"
 # DEFAULT_EMBEDDING_MODEL = "sentence-transformers/all-mpnet-base-v2"
 DEFAULT_EMBEDDING_MODEL = "Linq-AI-Research/Linq-Embed-Mistral"
 
@@ -518,26 +532,60 @@ Write a cohesive paragraph summary (200-400 words) that:
 Emphasize how the individual's self-states evolve over time. Do not use bulleted lists or headers in your summary. Write in a fluid, paragraph style."""
 
 
-# ── Generation (Ollama, local) ────────────────────────────────────────────────
+# ── Generation (local backends: Ollama or vLLM on local weights) ─────────────
 
-def make_generator(model: str, host: str | None, temperature: float, max_tokens: int):
-    """Return a function prompt -> summary string, backed by a local Ollama model."""
-    import ollama
-    client = ollama.Client(host=host) if host else ollama
-    options = {"temperature": temperature, "num_predict": max_tokens}
+def make_generator(backend: str, model: str, host: str | None, temperature: float,
+                   max_tokens: int, tensor_parallel_size: int = 4,
+                   dtype: str = "auto", quantization: str | None = None,
+                   gpu_memory_utilization: float = 0.9,
+                   max_model_len: int | None = None, seed: int | None = None):
+    """Return a function prompt -> summary string, backed by a local model.
 
-    def generate(prompt: str) -> str:
-        resp = client.chat(
-            model=model,
-            messages=[
-                {"role": "system", "content": SYSTEM_MESSAGE},
-                {"role": "user", "content": prompt},
-            ],
-            options=options,
-        )
-        return resp["message"]["content"].strip()
+    backend "ollama": local ollama daemon (single-GPU smoke runs).
+    backend "vllm":   local weights via vLLM with tensor parallelism (cluster).
+    backend "mock":   deterministic pseudo-summaries (functional tests).
+    """
+    if backend == "ollama":
+        import ollama
+        client = ollama.Client(host=host) if host else ollama
+        options = {"temperature": temperature, "num_predict": max_tokens}
 
-    return generate
+        def generate(prompt: str) -> str:
+            resp = client.chat(
+                model=model,
+                messages=[
+                    {"role": "system", "content": SYSTEM_MESSAGE},
+                    {"role": "user", "content": prompt},
+                ],
+                options=options,
+            )
+            return resp["message"]["content"].strip()
+
+        return generate
+
+    if backend == "vllm":
+        vllm_backend = VLLMBackend(
+            model, tensor_parallel_size=tensor_parallel_size, dtype=dtype,
+            quantization=quantization, gpu_memory_utilization=gpu_memory_utilization,
+            max_model_len=max_model_len, seed=seed,
+            temperature=temperature, max_tokens=max_tokens)
+
+        def generate(prompt: str) -> str:
+            msgs = [{"role": "system", "content": SYSTEM_MESSAGE},
+                    {"role": "user", "content": prompt}]
+            return vllm_backend.generate([msgs])[0]
+
+        return generate
+
+    if backend == "mock":
+        mock = MockBackend(max_tokens=max_tokens)
+
+        def generate(prompt: str) -> str:
+            return mock.generate([[{"role": "user", "content": prompt}]])[0]
+
+        return generate
+
+    raise ValueError(f"Unknown backend: {backend}")
 
 
 # ── Task B / Task C drivers ───────────────────────────────────────────────────
@@ -585,7 +633,19 @@ def run_task_b(
         p.embedding = v
 
     results = []
-    for i, post in enumerate(targets):
+    # Resumable checkpoint: per-post records appended after every generation,
+    # skipped on restart. Official-format submission rewritten after each post.
+    checkpoint = Checkpoint(os.path.join(output_dir, f"checkpoint_eaionflux_k{k}_taskb.jsonl"))
+    submission_path = os.path.join(output_dir, f"eaionflux_k{k}_taskb_submission.json")
+
+    pending = [p for p in targets if not checkpoint.has(p.timeline_id, p.post_id)]
+    print(f"Pending targets: {len(pending)} / {len(targets)} (checkpoint resumed)")
+
+    def _submission_records():
+        return {(tl, pid): {"summary": rec["one_shot_summary"]}
+                for (tl, pid), rec in checkpoint.records.items()}
+
+    for i, post in enumerate(pending):
         candidates = [
             c for c in db_posts
             if not (c.timeline_id == post.timeline_id and c.post_index == post.post_index)
@@ -600,8 +660,7 @@ def run_task_b(
         zero_shot = None if skip_zero_shot else generate(build_task_b_prompt(post, []))
 
         top = retrieved[0] if retrieved else None
-        results.append({
-            "timeline_id": post.timeline_id,
+        checkpoint.append(post.timeline_id, post.post_id, {
             "post_index": post.post_index,
             "wellbeing": post.wellbeing,
             "gold_summary": post.summary,
@@ -615,17 +674,27 @@ def run_task_b(
             "retrieval_similarity": round(top[1], 6) if top else None,
             # EAIonFlux provenance (additive to the canonical pipeline schema):
             "k": k,
-            "post_id": post.post_id,
         })
-        if (i + 1) % 10 == 0 or i == len(targets) - 1:
-            print(f"  [{i + 1}/{len(targets)}] {post.timeline_id}#{post.post_index} "
+        write_task_b_submission(timelines, _submission_records(), submission_path)
+        if (i + 1) % 10 == 0 or i == len(pending) - 1:
+            print(f"  [{i + 1}/{len(pending)}] {post.timeline_id}#{post.post_index} "
                   f"-> {one_shot[:80]}...")
+
+    # Final outputs: the canonical task_b_results-style JSON (all posts, in the
+    # original target order) + the official-format submission.
+    order = {(t.timeline_id, t.post_id): i for i, t in enumerate(targets)}
+    results = sorted(
+        ({"timeline_id": tl, "post_id": pid,
+          **{k2: v for k2, v in rec.items() if k2 != "_key"}}
+         for (tl, pid), rec in checkpoint.records.items()),
+        key=lambda r: order.get((r["timeline_id"], r["post_id"]), 1 << 30))
 
     ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     out_path = os.path.join(output_dir, f"task_b_eaionflux_k{k}_{ts}.json")
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
     print(f"Saved {len(results)} Task B summaries to {out_path}")
+    write_task_b_submission(timelines, _submission_records(), submission_path)
     return results
 
 
@@ -671,8 +740,22 @@ def run_task_c(
     for tl, v in zip(db_timelines, vecs):
         tl.embedding = v
 
-    results = []
-    for i, tl in enumerate(targets):
+    # Resumable checkpoint: per-timeline records appended after every
+    # generation, skipped on restart.
+    checkpoint = Checkpoint(os.path.join(
+        output_dir, f"checkpoint_eaionflux_k{k}_{input_type}_taskc.jsonl"))
+    submission_path = os.path.join(
+        output_dir, f"eaionflux_k{k}_{input_type}_taskc_submission.json")
+
+    pending = [t for t in targets
+               if not checkpoint.has(t.timeline_id, "__timeline__")]
+    print(f"Pending timelines: {len(pending)} / {len(targets)} (checkpoint resumed)")
+
+    def _submission_records():
+        return {(tl, "__timeline__"): {"summary": rec["predicted_summary"]}
+                for (tl, _), rec in checkpoint.records.items()}
+
+    for i, tl in enumerate(pending):
         candidates = [c for c in db_timelines if c.timeline_id != tl.timeline_id]
         retrieved = top_k_similar(tl.embedding, candidates, k)
         examples = [c for c, _ in retrieved]
@@ -683,8 +766,7 @@ def run_task_c(
         summary = generate(prompt)
         gen_time = round(time.perf_counter() - t0, 1)
 
-        results.append({
-            "timeline_id": tl.timeline_id,
+        checkpoint.append(tl.timeline_id, "__timeline__", {
             "n_posts": len(tl.posts),
             "input_type": input_type,
             "prompt_style": prompt_style,
@@ -698,13 +780,22 @@ def run_task_c(
                 for c, s in retrieved
             ],
         })
-        print(f"  [{i + 1}/{len(targets)}] {tl.timeline_id} -> {summary[:80]}...")
+        write_task_c_submission(timelines, _submission_records(), submission_path)
+        print(f"  [{i + 1}/{len(pending)}] {tl.timeline_id} -> {summary[:80]}...")
+
+    order = {t.timeline_id: i for i, t in enumerate(targets)}
+    results = sorted(
+        ({"timeline_id": tl,
+          **{k2: v for k2, v in rec.items() if k2 != "_key"}}
+         for (tl, _), rec in checkpoint.records.items()),
+        key=lambda r: order.get(r["timeline_id"], 1 << 30))
 
     ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     out_path = os.path.join(output_dir, f"task_c_eaionflux_k{k}_{input_type}_{ts}.json")
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
     print(f"Saved {len(results)} Task C summaries to {out_path}")
+    write_task_c_submission(timelines, _submission_records(), submission_path)
     return results
 
 
@@ -722,15 +813,30 @@ def main():
                         help="Which task(s) to run.")
     parser.add_argument("--k", type=int, default=5,
                         help="Number of in-context examples to retrieve (paper used 5 and 10).")
-    parser.add_argument("--model", default=DEFAULT_OLLAMA_MODEL,
-                        help=f"Ollama generation model (paper: llama3.3:70b). "
-                             f"Default: {DEFAULT_OLLAMA_MODEL}.")
+    parser.add_argument("--backend", default="ollama", choices=["ollama", "vllm", "mock"],
+                        help="Generation backend: ollama (local daemon, default), "
+                             "vllm (cluster, local weights + tensor parallelism), "
+                             "mock (functional tests).")
+    parser.add_argument("--model", default=None,
+                        help="Generation model. Defaults: ollama backend -> "
+                             f"{DEFAULT_OLLAMA_MODEL} (paper), vllm backend -> "
+                             f"{DEFAULT_VLLM_MODEL} (paper). For vllm pass the "
+                             "path to the local weights directory.")
     parser.add_argument("--embedding_model", default=DEFAULT_EMBEDDING_MODEL,
                         help="sentence-transformers embedding model id (paper: "
                              "Linq-AI-Research/Linq-Embed-Mistral). "
                              f"Default: {DEFAULT_EMBEDDING_MODEL}.")
     parser.add_argument("--ollama_host", default=None,
                         help="Ollama host URL (default: local daemon).")
+    parser.add_argument("--tensor_parallel_size", type=int, default=4,
+                        help="vLLM tensor parallelism across GPUs (vllm backend only).")
+    parser.add_argument("--dtype", default="auto")
+    parser.add_argument("--quantization", default=None,
+                        help="Optional vLLM quantization (e.g. 'fp8', 'awq') for 70B "
+                             "on smaller GPUs.")
+    parser.add_argument("--gpu_memory_utilization", type=float, default=0.9)
+    parser.add_argument("--max_model_len", type=int, default=None,
+                        help="vLLM context length (None = model default).")
     parser.add_argument("--temperature", type=float, default=0.1)
     parser.add_argument("--max_tokens", type=int, default=600)
     parser.add_argument("--no_exclude_same_timeline", action="store_true",
@@ -751,9 +857,48 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     exclude_same = not args.no_exclude_same_timeline
 
+    if args.model is None:
+        args.model = DEFAULT_OLLAMA_MODEL if args.backend == "ollama" else DEFAULT_VLLM_MODEL
+
     timelines = load_timelines(args.data_dir)
-    generate = make_generator(args.model, args.ollama_host, args.temperature, args.max_tokens)
-    print(f"Generation model (Ollama): {args.model} | Embedding model: {args.embedding_model}")
+    generate = make_generator(
+        args.backend, args.model, args.ollama_host, args.temperature,
+        args.max_tokens, tensor_parallel_size=args.tensor_parallel_size,
+        dtype=args.dtype, quantization=args.quantization,
+        gpu_memory_utilization=args.gpu_memory_utilization,
+        max_model_len=args.max_model_len)
+    print(f"Generation backend: {args.backend} | model: {args.model} | "
+          f"Embedding model: {args.embedding_model}")
+
+    write_settings_log(
+        os.path.join(args.output_dir, "eaionflux_settings.md"),
+        f"EAIonFlux Tasks B+C (k={args.k}) — generation settings",
+        settings=[
+            ("generation model", args.model, "paper (llama3.3:70b)"),
+            ("backend", args.backend, "our setup (vLLM local weights on cluster / ollama locally)"),
+            ("tensor_parallel_size", args.tensor_parallel_size, "our setup"),
+            ("temperature", args.temperature,
+             "our default — paper does not report decoding settings"),
+            ("top_p", 1.0, "our default — paper silent"),
+            ("max_tokens", args.max_tokens, "our default — paper silent"),
+            ("k (in-context examples)", args.k, "paper (5 and 10)"),
+            ("embedding model", args.embedding_model,
+             "paper (Linq-Embed-Mistral); lighter default available"),
+            ("retrieval", "exact top-k cosine (paper: ChromaDB ANN)",
+             "paper + our equivalence note"),
+            ("prompts", "paper Appendix A.2 / A.3 templates", "paper"),
+            ("evidence input", "gold adaptive/maladaptive spans + gold well-being",
+             "project convention"),
+            ("leave-one-timeline-out", exclude_same, "project convention"),
+        ],
+        notes=[
+            "Resumable: per-post/per-timeline JSONL checkpoints; completed "
+            "targets are skipped on restart.",
+            "Official-format submission JSONs are rewritten after every "
+            "generation (eaionflux_k{K}_taskb_submission.json / "
+            "eaionflux_k{K}_{input_type}_taskc_submission.json).",
+        ],
+    )
 
     # post_summaries map fed into Task C: cascaded Task B outputs if both run,
     # else optionally gold, else None. input_type records that provenance.
