@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 # =============================================================================
 # Cluster driver — runs every reimplemented CLPsych 2025 system (Task B) plus
-# the EAIonFlux rerun (Tasks B + C) with the ORIGINAL paper models, via vLLM
-# with tensor parallelism across the cluster's 4 GPUs.
+# the EAIonFlux rerun (Task B) with the ORIGINAL paper models, via vLLM with
+# tensor parallelism across the cluster's 4 GPUs.
+#
+# TASK B ONLY for now. Every system also implements Task C (--task c, or
+# --task bc to run both in one model load) — see the commented Task C blocks
+# at the bottom of this script. uOttawa's Task C needs its own Task B
+# summaries, so for Task C use its --task bc.
 #
 # Systems run (in order):
 #   1. BULUSI     Task B   Qwen2.5-72B-Instruct   (5-shot contriever + ms-marco rerank)
@@ -10,7 +15,7 @@
 #   3. ISM        Task B   Meta-Llama-3-8B-Instruct (10 candidates + KDE selection)
 #   4. uOttawa    Task B   Llama-3.3-70B-Instruct (variant S2, one-shot; see
 #                        the commented S1/S3 blocks for the other submissions)
-#   5. EAIonFlux  Tasks B+C Llama-3.3-70B-Instruct (k=5, paper original model)
+#   5. EAIonFlux  Task B  Llama-3.3-70B-Instruct (k=5, paper original model)
 #
 # Resumable: each system appends per-post/per-timeline results to a JSONL
 # checkpoint and skips completed items on restart, so a crashed or preempted
@@ -92,7 +97,7 @@ step() {
 step "BULUSI Task B — Qwen2.5-72B (5-shot: contriever top-50 -> ms-marco rerank -> top-5, LOTO)"
 "$PYTHON" "$REPO_ROOT/pipelines/bulusi_model.py" \
     --data_dir "$DATA_DIR" --output_dir "$OUT_DIR/bulusi" \
-    --backend vllm --model "$QWEN25_72B_PATH" \
+    --task b --backend vllm --model "$QWEN25_72B_PATH" \
     --tensor_parallel_size "$TP" --gpu_memory_utilization "$GPU_UTIL" \
     --batch_size "$BATCH" "${QUANT_FLAG[@]+"${QUANT_FLAG[@]}"}"
 
@@ -100,7 +105,7 @@ step "BULUSI Task B — Qwen2.5-72B (5-shot: contriever top-50 -> ms-marco reran
 step "Aquarius Task B — Qwen2.5-32B (one-shot, BGE-large-en-v1.5 retrieval, LOTO)"
 "$PYTHON" "$REPO_ROOT/pipelines/aquarius_model.py" \
     --data_dir "$DATA_DIR" --output_dir "$OUT_DIR/aquarius" \
-    --backend vllm --model "$QWEN25_32B_PATH" \
+    --task b --backend vllm --model "$QWEN25_32B_PATH" \
     --tensor_parallel_size "$TP" --gpu_memory_utilization "$GPU_UTIL" \
     --batch_size "$BATCH"
 
@@ -112,7 +117,7 @@ step "Aquarius Task B — Qwen2.5-32B (one-shot, BGE-large-en-v1.5 retrieval, LO
 step "ISM Task B — Meta-Llama-3-8B (10 candidates + KDE selection, LOTO)"
 "$PYTHON" "$REPO_ROOT/pipelines/ism_model.py" \
     --data_dir "$DATA_DIR" --output_dir "$OUT_DIR/ism" \
-    --backend vllm --model "$LLAMA3_8B_PATH" \
+    --task b --backend vllm --model "$LLAMA3_8B_PATH" \
     --tensor_parallel_size "$TP" --gpu_memory_utilization "$GPU_UTIL" \
     --batch_size "$ISM_BATCH"
 
@@ -120,7 +125,7 @@ step "ISM Task B — Meta-Llama-3-8B (10 candidates + KDE selection, LOTO)"
 step "uOttawa Task B (S2 one-shot, their best submission) — Llama-3.3-70B"
 "$PYTHON" "$REPO_ROOT/pipelines/uottawa_model.py" \
     --data_dir "$DATA_DIR" --output_dir "$OUT_DIR/uottawa" \
-    --backend vllm --model "$LLAMA33_70B_PATH" --variant s2 \
+    --task b --backend vllm --model "$LLAMA33_70B_PATH" --variant s2 \
     --tensor_parallel_size "$TP" --gpu_memory_utilization "$GPU_UTIL" \
     --batch_size "$BATCH" "${QUANT_FLAG[@]+"${QUANT_FLAG[@]}"}"
 
@@ -138,17 +143,60 @@ step "uOttawa Task B (S2 one-shot, their best submission) — Llama-3.3-70B"
 #     --tensor_parallel_size "$TP" --gpu_memory_utilization "$GPU_UTIL" \
 #     --batch_size "$BATCH" "${QUANT_FLAG[@]+"${QUANT_FLAG[@]}"}"
 
-# ── 5. EAIonFlux rerun (Tasks B + C, Llama-3.3-70B — the paper's model) ─────
-step "EAIonFlux Tasks B+C — Llama-3.3-70B (k=5, ICL, Task C cascades Task B)"
+# ── 5. EAIonFlux rerun (Task B, Llama-3.3-70B — the paper's model) ──────────
+step "EAIonFlux Task B — Llama-3.3-70B (k=5, ICL)"
 "$PYTHON" "$REPO_ROOT/pipelines/eaionflux_model.py" \
     --data_dir "$DATA_DIR" --output_dir "$OUT_DIR/eaionflux" \
-    --backend vllm --model "$LLAMA33_70B_PATH" --task both --k 5 \
+    --backend vllm --model "$LLAMA33_70B_PATH" --task B --k 5 \
     --skip_zero_shot \
     --tensor_parallel_size "$TP" --gpu_memory_utilization "$GPU_UTIL" \
     "${QUANT_FLAG[@]+"${QUANT_FLAG[@]}"}"
 
+# ── Task C (for later use — not run for now) ────────────────────────────────
+# Every system implements Task C too. To add Task C runs, uncomment the blocks
+# you want and rerun this script (checkpoints make it resumable, so only the
+# Task C generations are added). Score Task C submissions with
+# clpsych2025/evaluation/run.py --tasks C.
+#
+# step "BULUSI Task C"
+# "$PYTHON" "$REPO_ROOT/pipelines/bulusi_model.py" \
+#     --data_dir "$DATA_DIR" --output_dir "$OUT_DIR/bulusi" \
+#     --task c --backend vllm --model "$QWEN25_72B_PATH" \
+#     --tensor_parallel_size "$TP" --gpu_memory_utilization "$GPU_UTIL" \
+#     --batch_size "$BATCH" "${QUANT_FLAG[@]+"${QUANT_FLAG[@]}"}"
+#
+# step "Aquarius Task C"
+# "$PYTHON" "$REPO_ROOT/pipelines/aquarius_model.py" \
+#     --data_dir "$DATA_DIR" --output_dir "$OUT_DIR/aquarius" \
+#     --task c --backend vllm --model "$QWEN25_32B_PATH" \
+#     --tensor_parallel_size "$TP" --gpu_memory_utilization "$GPU_UTIL" \
+#     --batch_size "$BATCH"
+#
+# step "ISM Task C"
+# "$PYTHON" "$REPO_ROOT/pipelines/ism_model.py" \
+#     --data_dir "$DATA_DIR" --output_dir "$OUT_DIR/ism" \
+#     --task c --backend vllm --model "$LLAMA3_8B_PATH" \
+#     --tensor_parallel_size "$TP" --gpu_memory_utilization "$GPU_UTIL" \
+#     --batch_size "$ISM_BATCH"
+#
+# uOttawa Task C cascades its own Task B summaries -> use --task bc (Task B is
+# resumed from its checkpoint, so only missing posts + Task C are generated).
+# step "uOttawa Task C (S2, cascades Task B)"
+# "$PYTHON" "$REPO_ROOT/pipelines/uottawa_model.py" \
+#     --data_dir "$DATA_DIR" --output_dir "$OUT_DIR/uottawa" \
+#     --task bc --backend vllm --model "$LLAMA33_70B_PATH" --variant s2 \
+#     --tensor_parallel_size "$TP" --gpu_memory_utilization "$GPU_UTIL" \
+#     --batch_size "$BATCH" "${QUANT_FLAG[@]+"${QUANT_FLAG[@]}"}"
+#
+# step "EAIonFlux Task C (cascades Task B)"
+# "$PYTHON" "$REPO_ROOT/pipelines/eaionflux_model.py" \
+#     --data_dir "$DATA_DIR" --output_dir "$OUT_DIR/eaionflux" \
+#     --backend vllm --model "$LLAMA33_70B_PATH" --task C --k 5 \
+#     --tensor_parallel_size "$TP" --gpu_memory_utilization "$GPU_UTIL" \
+#     "${QUANT_FLAG[@]+"${QUANT_FLAG[@]}"}"
+
 # ── Summary ──────────────────────────────────────────────────────────────────
-step "All systems complete. Submission files (copy back and score locally):"
+step "All systems complete. Task B submission files (copy back and score locally):"
 find "$OUT_DIR" -name "*taskb_submission.json" -print || true
 echo ""
 echo "Score the Task B systems locally with, e.g.:"
@@ -158,6 +206,6 @@ echo "    $OUT_DIR/aquarius/aquarius_taskb_submission.json \\"
 echo "    $OUT_DIR/ism/ism_taskb_submission.json \\"
 echo "    $OUT_DIR/uottawa/uottawa_s2_taskb_submission.json \\"
 echo "    $OUT_DIR/eaionflux/eaionflux_k5_taskb_submission.json"
-echo "(the EAIonFlux Task C submission is scored separately with run.py --tasks C;"
-echo " each system's dir also holds a *_settings.md decoding log — the source"
-echo " for the paper's reimplementation section)"
+echo "(Task C submissions — if you enable the blocks above — are scored with"
+echo " run.py --tasks C; each system's dir also holds a *_settings.md decoding"
+echo " log — the source for the paper's reimplementation section)"

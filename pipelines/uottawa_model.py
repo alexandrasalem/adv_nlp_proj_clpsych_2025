@@ -1,50 +1,46 @@
-"""uOttawa (CLPsych 2025) Task B system — reimplementation for the critique paper.
+"""uOttawa (CLPsych 2025) Task B + Task C system — reimplementation for the critique paper.
 
 Reference:
     Chan, Khunkhun, Inkpen, Lossio-Ventura. "Prompt Engineering for Capturing
     Dynamic Mental Health Self-States from Social Media Posts." CLPsych 2025,
     pp. 256-267.
 
-What this reproduces (paper §3 + Appendix A.3 Table 7, Task B)
---------------------------------------------------------------
-* Pure prompt engineering on a local Llama-3.3-70B-Instruct. No fine-tuning,
-  no retrieval, no evidence input — the ONLY input is the raw post text
-  (their Task B template placeholder is {INCLUDE_TEXT (POST)}).
-* Three official submission variants:
-    S1 (uOttawa_1): contextual zero-shot — "loosely structured" prompt with
-                    domain-specific terms (exact text not published; our
-                    reconstruction follows the paper's description and is
-                    flagged as such in the settings log).
-    S2 (uOttawa_2): structured contextual one-shot — the paper's Table 7
-                    template verbatim + one annotated training example.
-                    (Their best Task B run: mean consistency 0.860.)
-    S3 (uOttawa_3): structured contextual few-shot — same template + seven
-                    examples ("carefully selected to cover a range of self
-                    states, post lengths...").
-* Output guideline enforced by the prompt: a single paragraph, under
-  "### Summary:", no more than 6 sentences.
+Task B (paper §3 + Appendix A.3 Table 7)
+----------------------------------------
+* Prompt engineering on local Llama-3.3-70B-Instruct; no fine-tuning, no
+  retrieval, no evidence input — the only input is the raw post text.
+* Variants: S1 contextual zero-shot (text unpublished; our reconstruction),
+  S2 structured one-shot (Table 7 + 1 example; their best Task B run),
+  S3 structured few-shot (Table 7 + 7 examples).
 
-Project-convention adaptations (logged in the run's settings file):
-* The paper hand-picked its S2/S3 examples; we cannot, so examples are
-  selected programmatically with a fixed seed to cover self-state variety
-  (adaptive/maladaptive/mixed) and post-length spread (documented
-  reconstruction of "a range of self states, post lengths").
-* The paper used no leave-one-timeline-out for its fixed examples (and the
-  project LOTO requirement lists Aquarius/BULUSI/EAIonFlux/ISM only), so LOTO
-  is OFF by default here; --loto drops/replaces same-timeline examples per
-  target post.
-* Decoding: the paper explicitly did not tune temperature/top_p ("could not
-  ... explore ... hyperparameter tuning of temperature or top_p"); we use
-  temperature 0.1, top_p 1.0, max_tokens 600 (documented defaults).
+Task C (Appendix A.3 Table 8)
+-----------------------------
+* Input: the chronologically ordered post-level summaries of the timeline
+  produced by Task B ({INCLUDE_TEXT (Summaries of posts on specific timeline
+  from Task B)}). We use this system's OWN Task B summaries of the same
+  variant, read from checkpoint_uottawa_{variant}_taskb.jsonl — so Task C
+  must run after Task B (--task bc does both in order).
+* Example block: a training timeline's gold post summaries (input) and its
+  gold timeline summary (output). S2 = 1 example; S3 = 3 examples (the paper
+  reports few-shot working better than one-shot for timelines); S1 =
+  zero-shot reconstruction (text unpublished).
+* Output heading "### Timeline Summary:"; at most 6 sentences.
 
-Run on the cluster (vLLM, local weights, tensor parallelism):
-    python pipelines/uottawa_model.py --data_dir <timeline json dir> \
-        --model /path/to/Llama-3.3-70B-Instruct --backend vllm --variant s2
+Project-convention adaptations (logged in the settings files):
+* Hand-picked examples (unpublished) are replaced by seeded programmatic
+  selection (Task B: stratified by dominant self-state x post length;
+  Task C: seeded random training timelines).
+* Leave-one-timeline-out is ON by default (--no_loto to disable): a fixed
+  example from the target's own timeline would place that timeline's gold
+  summary in the prompt. Same-timeline examples are replaced, keeping the count.
+* Table 7 text is transcribed as published, including its typos ("consise",
+  "Fight or fight behavior").
+* Decoding: the paper explicitly did not tune temperature/top_p; we use
+  temperature 0.1, top_p 1.0, max_tokens 600.
 
-Outputs (to --output_dir):
-    checkpoint_uottawa_{variant}_taskb.jsonl   resumable per-post results
-    uottawa_{variant}_taskb_submission.json    official submission format
-    uottawa_{variant}_taskb_settings.md        generation-settings log
+Run on the cluster:
+    python uottawa_model.py --data_dir <dir> --model /path/to/Llama-3.3-70B-Instruct \
+        --variant s2 --task bc
 """
 
 import argparse
@@ -54,8 +50,10 @@ import random
 import time
 
 from system_utils import (
-    Post, Timeline, load_timelines, make_backend, Checkpoint,
-    write_task_b_submission, write_settings_log, drop_until_fits,
+    Post, Timeline, load_timelines, Checkpoint,
+    write_task_b_submission, write_task_c_submission, write_settings_log,
+    drop_until_fits, fit_timeline_prompt, truncate_words, task_c_targets,
+    add_common_args, backend_from_args, common_settings,
 )
 
 DEFAULT_MODEL = "meta-llama/Llama-3.3-70B-Instruct"
@@ -71,9 +69,15 @@ UOTTAWA_S1_PROMPT = """You are a mental health expert analyzing a person's socia
 Input text:
 {post}"""
 
-# S2/S3 — the paper's Table 7 one-shot template, VERBATIM as extracted from
-# the paper (including the original's "consise" and "Fight or fight" typos).
-# The example block is repeated for the few-shot variant (S3, 7 examples).
+# S1 Task C — same loose style, reconstructed from Table 8's task statement.
+UOTTAWA_S1_TIMELINE_PROMPT = """You are a mental health expert analyzing a person's timeline of social media posts to understand how their self-states change over time. Using your knowledge of adaptive and maladaptive self-states — identifiable units of Affect, Behavior, and Cognition towards the self or others, where adaptive states help fulfill basic desires and needs such as relatedness, autonomy and competence, and maladaptive states hinder the fulfillment of those needs — write a summary of the interplay between adaptive and maladaptive self-states along the timeline, given the chronologically ordered summaries of its posts below. Emphasize temporal dynamics such as flexibility, rigidity, improvement, and deterioration, and, if applicable, describe how the dominance of the self-states changes over time and how changes in affect, behavior, cognition, and desire contribute to these transitions. Write the answer as a single clear paragraph of no more than 6 sentences.
+
+Input text:
+{summaries}"""
+
+# S2/S3 Task B — the paper's Table 7 template as published (including the
+# original's "consise" and "Fight or fight" typos). The example block is
+# repeated for the few-shot variant (S3, 7 examples).
 UOTTAWA_STRUCTURED_PROMPT = """### Task:
 Your task is to summarize self-states for the social media post below. Specifically, generate a summary of the interplay between adaptive and maladaptive states identified in the post. Begin by determining which self-state is dominant (adaptive/maladaptive) and describe it first. For each self-state, identify the central organizing aspect (A, B, C, or D) that drives the state and structure the summary around it. Describe how this central aspect influences the rest, emphasizing potential causal relationships between them. Then, proceed to the second self-state and follow the same approach. If the post contains only one self-state (either adaptive or maladaptive), summarize only that state. Note that the summary does not need to explicitly highlight A, B, C, or D, but should aim to naturally integrate these elements into the description.
 —
@@ -99,7 +103,7 @@ Self-states constitute identifiable units characterized by specific combinations
 - Maladaptive Examples: Self-criticism
 6. Desire (D): The person's main desire, need, intention, fear or expectation
 - Adaptive Examples: Relatedness, Autonomy and adaptive control, Competence, Self-esteem, Self-care
-- Maladaptive Examples: Expectation that relatedness need will not be met, Expectation that autonomy need will not be met, Expectation that competence need will not be met
+- Maladaptive Examples: Expectation that relatedness need will not be met, Expectation that autonomy needs will not be met, Expectation that competence needs will not be met
 —
 ### Guidelines for Output:
 - Response Section: Provide an answer under the headings '### Summary:'.
@@ -120,229 +124,324 @@ EXAMPLE_SECTION = """### Example:
 —
 """
 
+# S2/S3 Task C — Table 8. Its Definitions and ABCD sections are identical to
+# Table 7's, so they are sliced from the Task B template rather than retyped.
+_DEFS_ABCD = UOTTAWA_STRUCTURED_PROMPT[
+    UOTTAWA_STRUCTURED_PROMPT.index("### Definitions:"):
+    UOTTAWA_STRUCTURED_PROMPT.index("—\n### Guidelines for Output:")]
 
-# ── Example selection (documented reconstruction of the hand-picked examples) ─
+UOTTAWA_TIMELINE_PROMPT = ("""### Task:
+Your task is to summarize self-states for each timeline, given the summaries for each post on the timeline. Specifically, generate a summary focusing on the Interplay between adaptive and maladaptive self-states along the timeline. Emphasize temporal dynamics focusing on concepts such as flexibility, rigidity, improvement, and deterioration. If applicable, describe the extent to which the dominance of the self-states changes over time and how changes in aspects (Affect, Behavior, Cognition, and Desire) contribute to these transitions.
+—
+""" + _DEFS_ABCD + """—
+### Guidelines for Output:
+- Response Section: Provide an answer under the headings '### Timeline Summary:'.
+- Format the answer as a single paragraph, making it clear and consise.
+- The summary should be no more than 6 sentences.
+- Ensure the timeline summary captures the main points without unnecessary details.
+—
+{example_block}### Analyze the following input text based on the given criteria.
+### Input Text:
+{summaries}
+### Output Text:""")
+
+TIMELINE_EXAMPLE_SECTION = """### Example:
+##### Input text:
+{example_summaries}
+##### Output text:
+### Timeline Summary:
+{example_timeline_summary}
+—
+"""
+
+
+# ── Example selection (documented reconstruction of hand-picked examples) ────
 
 def select_examples(pool: list[Post], n: int, seed: int = EXAMPLE_SEED) -> list[Post]:
-    """Programmatic stand-in for the paper's hand-picked examples.
-
-    Stratifies by dominant self-state and post length so the selection covers
-    "a range of self states, post lengths" (paper §3). Deterministic (seeded).
-    """
+    """Stratify by dominant self-state and post length so the selection covers
+    "a range of self states, post lengths" (paper §3). Deterministic."""
     rng = random.Random(seed)
-    by_len = sorted(pool, key=lambda p: len(p.text.split()))
+    by_len = sorted(pool, key=lambda p: (len(p.text.split()), p.timeline_id, p.post_index))
     n_third = max(1, len(by_len) // 3)
-    strata = {
-        ("adaptive", "short"): [p for p in by_len[:n_third] if p.dominant_state() == "adaptive"],
-        ("adaptive", "medium"): [p for p in by_len[n_third:2 * n_third] if p.dominant_state() == "adaptive"],
-        ("adaptive", "long"): [p for p in by_len[2 * n_third:] if p.dominant_state() == "adaptive"],
-        ("maladaptive", "short"): [p for p in by_len[:n_third] if p.dominant_state() == "maladaptive"],
-        ("maladaptive", "medium"): [p for p in by_len[n_third:2 * n_third] if p.dominant_state() == "maladaptive"],
-        ("maladaptive", "long"): [p for p in by_len[2 * n_third:] if p.dominant_state() == "maladaptive"],
-        ("mixed", "any"): [p for p in by_len if p.dominant_state() == "mixed"],
-    }
-    order = list(strata.keys())
+    thirds = {"short": by_len[:n_third], "medium": by_len[n_third:2 * n_third],
+              "long": by_len[2 * n_third:]}
+    strata = [[p for p in thirds[l] if p.dominant_state() == s]
+              for s in ("adaptive", "maladaptive") for l in ("short", "medium", "long")]
+    strata.append([p for p in by_len if p.dominant_state() == "mixed"])
     picked: list[Post] = []
-    for key in order:
+    for stratum in strata:
         if len(picked) >= n:
             break
-        candidates = [p for p in strata[key] if p not in picked]
-        if candidates:
-            picked.append(rng.choice(candidates))
-    # Top up from the remaining pool if any stratum was empty.
-    remaining = [p for p in pool if p not in picked]
+        cands = [p for p in stratum if p not in picked]
+        if cands:
+            picked.append(rng.choice(cands))
+    remaining = [p for p in by_len if p not in picked]
     while len(picked) < n and remaining:
         picked.append(remaining.pop(rng.randrange(len(remaining))))
     return picked[:n]
 
 
+def loto_examples(fixed: list, pool: list, target_tl: str, pick) -> list:
+    """Replace fixed examples from the target's own timeline with picks from
+    other timelines, preserving the count and the order of the rest."""
+    kept = [e for e in fixed if e.timeline_id != target_tl]
+    if len(kept) == len(fixed):
+        return fixed
+    extra_pool = [q for q in pool if q.timeline_id != target_tl and q not in kept]
+    return kept + pick(extra_pool, len(fixed) - len(kept))
+
+
+def select_timelines(pool: list[Timeline], n: int, seed: int = EXAMPLE_SEED) -> list[Timeline]:
+    pool = sorted(pool, key=lambda t: t.timeline_id)
+    return random.Random(seed).sample(pool, min(n, len(pool)))
+
+
 # ── Prompt construction ──────────────────────────────────────────────────────
 
-def build_messages(target: Post, variant: str,
-                   examples: list[Post]) -> list[dict]:
+def build_messages_b(target: Post, variant: str, examples: list[Post]) -> list[dict]:
     if variant == "s1":
         prompt = UOTTAWA_S1_PROMPT.format(post=target.text)
     else:
         example_block = "".join(
             EXAMPLE_SECTION.format(example_post=ex.text, example_summary=ex.summary)
             for ex in examples)
-        prompt = UOTTAWA_STRUCTURED_PROMPT.format(
-            example_block=example_block, post=target.text)
+        prompt = UOTTAWA_STRUCTURED_PROMPT.format(example_block=example_block,
+                                                  post=target.text)
     return [{"role": "user", "content": prompt}]
 
 
-def parse_summary(response: str) -> str:
-    """Take the text after '### Summary:' if the model echoed the heading;
-    otherwise the whole response."""
-    marker = "### Summary:"
+def format_summaries(summaries: list[str], cap: int | None) -> str:
+    return "\n".join(f"Post {i}: {truncate_words(s, cap)}"
+                     for i, s in enumerate(summaries, 1))
+
+
+def build_messages_c(input_summaries: list[str], variant: str,
+                     examples: list[Timeline], cap: int | None) -> list[dict]:
+    if variant == "s1":
+        prompt = UOTTAWA_S1_TIMELINE_PROMPT.format(
+            summaries=format_summaries(input_summaries, cap))
+    else:
+        example_block = "".join(
+            TIMELINE_EXAMPLE_SECTION.format(
+                example_summaries=format_summaries(
+                    [p.summary for p in ex.posts if p.summary], cap),
+                example_timeline_summary=ex.summary)
+            for ex in examples)
+        prompt = UOTTAWA_TIMELINE_PROMPT.format(
+            example_block=example_block,
+            summaries=format_summaries(input_summaries, cap))
+    return [{"role": "user", "content": prompt}]
+
+
+def parse_after(response: str, marker: str) -> str:
+    """Text after `marker` if the model echoed the heading, else the response."""
     if marker in response:
         response = response.split(marker, 1)[1]
     return response.strip().strip("-").strip()
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# ── Generation ───────────────────────────────────────────────────────────────
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="uOttawa (CLPsych 2025) Task B system reimplementation.")
-    parser.add_argument("--data_dir", required=True,
-                        help="Directory of shared-task timeline JSON files.")
-    parser.add_argument("--output_dir", default="./outputs/uottawa")
-    parser.add_argument("--variant", default="s2", choices=["s1", "s2", "s3"],
-                        help="S1=zero-shot, S2=one-shot (their best Task B run), "
-                             "S3=few-shot (7 examples).")
-    parser.add_argument("--backend", default="vllm", choices=["vllm", "ollama", "mock"])
-    parser.add_argument("--model", default=DEFAULT_MODEL,
-                        help=f"Model path (local weights) or id. Default: {DEFAULT_MODEL} (paper).")
-    parser.add_argument("--tensor_parallel_size", type=int, default=4)
-    parser.add_argument("--dtype", default="auto")
-    parser.add_argument("--quantization", default=None,
-                        help="Optional vLLM quantization (e.g. 'fp8', 'awq') for 70B "
-                             "on smaller GPUs.")
-    parser.add_argument("--gpu_memory_utilization", type=float, default=0.9)
-    parser.add_argument("--max_model_len", type=int, default=None)
-    parser.add_argument("--temperature", type=float, default=0.1,
-                        help="Our documented default — paper explicitly did not tune "
-                             "temperature/top_p.")
-    parser.add_argument("--top_p", type=float, default=1.0)
-    parser.add_argument("--max_tokens", type=int, default=600)
-    parser.add_argument("--seed", type=int, default=None)
-    parser.add_argument("--n_examples", type=int, default=None,
-                        help="Override example count (defaults: S2=1, S3=7, paper values).")
-    parser.add_argument("--loto", action="store_true",
-                        help="Drop/replace same-timeline examples per target post "
-                             "(OFF by default — the paper used fixed hand-picked "
-                             "examples and LOTO was not required for uOttawa).")
-    parser.add_argument("--batch_size", type=int, default=16)
-    parser.add_argument("--limit", type=int, default=None)
-    args = parser.parse_args()
-
-    n_examples = args.n_examples if args.n_examples is not None else \
+def run_task_b(args, timelines, backend):
+    n_examples = args.n_examples_b if args.n_examples_b is not None else \
         {"s1": 0, "s2": 1, "s3": 7}[args.variant]
-
-    os.makedirs(args.output_dir, exist_ok=True)
-    timelines = load_timelines(args.data_dir)
     all_posts = [p for tl in timelines for p in tl.posts]
-    example_pool = [p for p in all_posts if p.summary]
-    targets = [p for p in all_posts if p.summary]
-    if args.limit:
-        targets = targets[:args.limit]
-    print(f"Example pool: {len(example_pool)} posts | targets: {len(targets)} "
-          f"| variant: {args.variant} ({n_examples} examples)")
+    pool = [p for p in all_posts if p.summary]
+    targets = pool[:args.limit] if args.limit else pool
+    fixed = select_examples(pool, n_examples) if n_examples else []
+    print(f"[Task B] variant {args.variant} | {n_examples} examples | targets {len(targets)}")
+    for ex in fixed:
+        print(f"  example {ex.timeline_id}#{ex.post_index} ({ex.dominant_state()}, "
+              f"{len(ex.text.split())} words)")
 
-    # Fixed examples (S2/S3) — selected once, as in the paper.
-    fixed_examples = select_examples(example_pool, n_examples) if n_examples else []
-    for ex in fixed_examples:
-        print(f"  Example: {ex.timeline_id}#{ex.post_index} "
-              f"({ex.dominant_state()}, {len(ex.text.split())} words)")
-
-    backend = make_backend(
-        args.backend, args.model, temperature=args.temperature,
-        max_tokens=args.max_tokens, tensor_parallel_size=args.tensor_parallel_size,
-        dtype=args.dtype, quantization=args.quantization,
-        gpu_memory_utilization=args.gpu_memory_utilization,
-        max_model_len=args.max_model_len, seed=args.seed,
-    )
-
-    # ── Generation loop (batched, resumable) ────────────────────────────────
-    ckpt_path = os.path.join(args.output_dir,
-                             f"checkpoint_uottawa_{args.variant}_taskb.jsonl")
-    checkpoint = Checkpoint(ckpt_path)
-    subm_path = os.path.join(args.output_dir,
-                             f"uottawa_{args.variant}_taskb_submission.json")
-
-    pending = [p for p in targets
-               if not checkpoint.has(p.timeline_id, p.post_id)]
-    print(f"Pending targets: {len(pending)} / {len(targets)} (checkpoint resumed)")
+    checkpoint = Checkpoint(os.path.join(
+        args.output_dir, f"checkpoint_uottawa_{args.variant}_taskb.jsonl"))
+    subm_path = os.path.join(args.output_dir, f"uottawa_{args.variant}_taskb_submission.json")
+    pending = [p for p in targets if not checkpoint.has(p.timeline_id, p.post_id)]
+    print(f"[Task B] pending {len(pending)} / {len(targets)}")
 
     for start in range(0, len(pending), args.batch_size):
         batch = pending[start:start + args.batch_size]
         t0 = time.perf_counter()
         prompts, metas = [], []
         for p in batch:
-            examples = fixed_examples
-            if args.loto:
-                examples = [ex for ex in fixed_examples
-                            if ex.timeline_id != p.timeline_id]
-                if len(examples) < len(fixed_examples):
-                    # Replace dropped examples with same-pool picks from
-                    # other timelines, preserving the count.
-                    extra = select_examples(
-                        [q for q in example_pool
-                         if q.timeline_id != p.timeline_id and q not in examples],
-                        len(fixed_examples) - len(examples))
-                    examples = examples + extra
+            examples = fixed if args.no_loto else \
+                loto_examples(fixed, pool, p.timeline_id, select_examples)
             msgs, k_used = drop_until_fits(
-                lambda k: build_messages(p, args.variant, examples[:k]), backend,
-                len(examples), args.max_model_len, args.max_tokens, min_examples=0)
+                lambda k, p=p, examples=examples: build_messages_b(p, args.variant, examples[:k]),
+                backend, len(examples), args.max_model_len, args.max_tokens, min_examples=0)
             prompts.append(msgs)
             metas.append((p, examples[:k_used]))
         responses = backend.generate(prompts)
+        dt = time.perf_counter() - t0
         for (p, examples), response in zip(metas, responses):
-            summary = parse_summary(response)
             checkpoint.append(p.timeline_id, p.post_id, {
-                "summary": summary,
+                "summary": parse_after(response, "### Summary:"),
                 "raw_response": response,
                 "variant": args.variant,
+                "n_examples": len(examples),
                 "example_post_ids": [e.post_id for e in examples],
                 "example_timelines": [e.timeline_id for e in examples],
                 "gold_summary": p.summary,
-                "generation_sec": round(time.perf_counter() - t0, 1) / len(batch),
+                "generation_sec": round(dt / len(batch), 2),
             })
-            print(f"  [{p.timeline_id}#{p.post_index}] {summary[:80]}...")
         write_task_b_submission(timelines, checkpoint, subm_path)
-        done = min(start + args.batch_size, len(pending))
-        print(f"Batch {done}/{len(pending)} done "
-              f"({time.perf_counter() - t0:.1f}s) — checkpoint + submission saved")
-
+        print(f"[Task B] {min(start + args.batch_size, len(pending))}/{len(pending)} ({dt:.1f}s)")
     write_task_b_submission(timelines, checkpoint, subm_path)
+    recs = list(checkpoint.records.values())
 
     write_settings_log(
         os.path.join(args.output_dir, f"uottawa_{args.variant}_taskb_settings.md"),
         f"uOttawa Task B (variant {args.variant}) — generation settings",
         settings=[
             ("generation model", args.model, "paper (Llama-3.3-70B-Instruct, local)"),
-            ("backend", args.backend, "our setup (vLLM, local weights)"),
-            ("tensor_parallel_size", args.tensor_parallel_size, "our setup"),
-            ("variant", args.variant,
-             "paper (S1 zero-shot / S2 one-shot / S3 few-shot; S2 was their best "
-             "Task B submission, mean consistency 0.860)"),
+            *common_settings(args),
+            ("temperature", args.temperature,
+             "our default — paper explicitly did not tune decoding hyperparameters"),
+            ("variant", args.variant, "paper (S1 zero-shot / S2 one-shot / S3 few-shot)"),
             ("n_examples", n_examples, "paper (S1: 0, S2: 1, S3: 7)"),
             ("example selection",
              f"programmatic stratified (dominant state x length), seed {EXAMPLE_SEED}",
-             "our reconstruction — paper hand-picked examples (text unpublished)"),
-            ("prompt (s2/s3)",
-             "paper Table 7 template verbatim (incl. original typos 'consise', "
-             "'Fight or fight')", "paper"),
+             "our reconstruction — paper hand-picked examples (unpublished)"),
+            ("prompt (s2/s3)", "paper Table 7 template as published, incl. its "
+             "typos 'consise' and 'Fight or fight'", "paper"),
             ("prompt (s1)", "reconstructed loose zero-shot",
-             "our reconstruction — paper describes but does not publish S1's text"),
-            ("temperature", args.temperature,
-             "our default — paper explicitly did not tune decoding hyperparameters"),
-            ("top_p", args.top_p, "our default — paper silent"),
-            ("max_tokens", args.max_tokens, "our default — paper silent"),
-            ("input", "raw post text only (no evidence spans, no well-being)",
-             "paper (Task B placeholder: {INCLUDE_TEXT (POST)})"),
-            ("leave-one-timeline-out", args.loto,
-             "OFF by default — paper used fixed examples; LOTO not required for "
-             "uOttawa per project decision"),
+             "our reconstruction — paper describes but does not publish S1"),
+            ("input", "raw post text only", "paper (Task B placeholder {INCLUDE_TEXT (POST)})"),
+            ("leave-one-timeline-out", not args.no_loto,
+             "project convention (a same-timeline example would expose that "
+             "timeline's gold summary); same-timeline examples are replaced"),
+            ("posts with fewer than n_examples (context guard)",
+             sum(1 for r in recs if r.get("n_examples", 0) < n_examples), "reported"),
         ],
         notes=[
-            "uOttawa Task B is prompt-only on the raw post text; unlike the "
-            "other systems it receives no evidence spans, which is faithful to "
-            "the original (gold evidence convention does not apply because "
-            "their prompt has no evidence slot).",
-            "The S2/S3 prompt keeps two typos that appear in the published "
-            "Table 7 ('consise', 'Fight or fight behavior'); flagged here so "
-            "the reimplementation section can note they are the paper's own.",
-            "Example posts are selected programmatically (seeded stratified "
-            "sampling over dominant self-state and post length) because the "
-            "paper's hand-picked examples were redacted.",
+            "uOttawa Task B receives no evidence spans — faithful to the original, "
+            "whose prompt has no evidence slot.",
+            "Example posts are selected programmatically because the paper's "
+            "hand-picked examples are not published.",
         ],
     )
 
-    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    print(f"\nuOttawa Task B ({args.variant}) run complete at {ts}. "
-          f"Submission: {subm_path}")
+
+def run_task_c(args, timelines, backend):
+    n_examples = args.n_examples_c if args.n_examples_c is not None else \
+        {"s1": 0, "s2": 1, "s3": 3}[args.variant]
+    pool = [tl for tl in timelines if tl.summary and any(p.summary for p in tl.posts)]
+    targets = task_c_targets(timelines, args.limit)
+    fixed = select_timelines(pool, n_examples) if n_examples else []
+
+    b_path = os.path.join(args.output_dir, f"checkpoint_uottawa_{args.variant}_taskb.jsonl")
+    if not os.path.exists(b_path):
+        raise SystemExit(f"Task C needs this variant's Task B output first: {b_path} "
+                         f"(run with --task b or --task bc).")
+    b_ckpt = Checkpoint(b_path)
+    print(f"[Task C] variant {args.variant} | {n_examples} examples | targets {len(targets)}")
+
+    checkpoint = Checkpoint(os.path.join(
+        args.output_dir, f"checkpoint_uottawa_{args.variant}_taskc.jsonl"))
+    subm_path = os.path.join(args.output_dir, f"uottawa_{args.variant}_taskc_submission.json")
+    pending = [tl for tl in targets if not checkpoint.has(tl.timeline_id, "__timeline__")]
+    print(f"[Task C] pending {len(pending)} / {len(targets)}")
+
+    for start in range(0, len(pending), args.batch_size):
+        batch = pending[start:start + args.batch_size]
+        t0 = time.perf_counter()
+        prompts, metas = [], []
+        for tl in batch:
+            inputs, missing = [], 0
+            for p in tl.posts:
+                rec = b_ckpt.get(tl.timeline_id, p.post_id)
+                if rec and rec.get("summary"):
+                    inputs.append(rec["summary"])
+                elif p.summary:          # annotated post without a Task B output
+                    missing += 1
+            if missing:
+                print(f"  WARNING {tl.timeline_id}: {missing} annotated posts have "
+                      f"no Task B summary (incomplete Task B run?)")
+            examples = fixed if args.no_loto else loto_examples(
+                fixed, pool, tl.timeline_id,
+                lambda extra, n: select_timelines(extra, n))
+            msgs, k_used, cap = fit_timeline_prompt(
+                lambda k, cap, inputs=inputs, examples=examples:
+                    build_messages_c(inputs, args.variant, examples[:k], cap),
+                backend, len(examples), args.max_model_len, args.max_tokens,
+                min_examples=0)
+            prompts.append(msgs)
+            metas.append((tl, examples[:k_used], cap, len(inputs), missing))
+        responses = backend.generate(prompts)
+        dt = time.perf_counter() - t0
+        for (tl, examples, cap, n_in, missing), response in zip(metas, responses):
+            checkpoint.append(tl.timeline_id, "__timeline__", {
+                "summary": parse_after(response, "### Timeline Summary:"),
+                "raw_response": response,
+                "variant": args.variant,
+                "n_examples": len(examples),
+                "example_timelines": [e.timeline_id for e in examples],
+                "n_input_summaries": n_in,
+                "n_missing_taskb": missing,
+                "post_word_cap": cap,
+                "gold_summary": tl.summary,
+                "generation_sec": round(dt / len(batch), 2),
+            })
+        write_task_c_submission(timelines, checkpoint, subm_path)
+        print(f"[Task C] {min(start + args.batch_size, len(pending))}/{len(pending)} ({dt:.1f}s)")
+    write_task_c_submission(timelines, checkpoint, subm_path)
+    recs = list(checkpoint.records.values())
+
+    write_settings_log(
+        os.path.join(args.output_dir, f"uottawa_{args.variant}_taskc_settings.md"),
+        f"uOttawa Task C (variant {args.variant}) — generation settings",
+        settings=[
+            ("generation model", args.model, "paper (Llama-3.3-70B-Instruct, local)"),
+            *common_settings(args),
+            ("temperature", args.temperature, "our default — paper did not tune"),
+            ("variant", args.variant, "paper"),
+            ("n_examples", n_examples,
+             "S2: 1 (one-shot); S3: 3 — our choice of count for 'few-shot' "
+             "(paper reports few-shot > one-shot for timelines)"),
+            ("example selection", f"seeded random training timelines, seed {EXAMPLE_SEED}",
+             "our reconstruction — paper's examples unpublished"),
+            ("example content", "gold post summaries (input) + gold timeline summary (output)",
+             "paper Table 8 example section"),
+            ("input", f"this system's own Task B summaries (variant {args.variant}), "
+                      "chronological", "paper Table 8 ({INCLUDE_TEXT (Summaries of "
+                      "posts on specific timeline from Task B)})"),
+            ("prompt (s2/s3)", "paper Table 8 (Definitions/ABCD identical to Table 7)", "paper"),
+            ("prompt (s1)", "reconstructed loose zero-shot", "our reconstruction"),
+            ("leave-one-timeline-out", not args.no_loto, "project convention"),
+            ("timelines with missing Task B summaries",
+             sum(1 for r in recs if r.get("n_missing_taskb")), "reported"),
+            ("timelines with fewer than n_examples (context guard)",
+             sum(1 for r in recs if r.get("n_examples", 0) < n_examples), "reported"),
+        ],
+        notes=[
+            "Task C inherits this variant's Task B outputs, as in the original "
+            "two-level pipeline.",
+        ],
+    )
+
+
+def main():
+    parser = argparse.ArgumentParser(description="uOttawa (CLPsych 2025) Task B/C reimplementation.")
+    add_common_args(parser, DEFAULT_MODEL, "./outputs/uottawa")
+    parser.add_argument("--variant", default="s2", choices=["s1", "s2", "s3"])
+    parser.add_argument("--n_examples_b", type=int, default=None,
+                        help="Override Task B example count (S1=0, S2=1, S3=7).")
+    parser.add_argument("--n_examples_c", type=int, default=None,
+                        help="Override Task C example count (S1=0, S2=1, S3=3).")
+    parser.add_argument("--no_loto", action="store_true",
+                        help="Disable leave-one-timeline-out (not recommended: a "
+                             "same-timeline example leaks that timeline's gold summary).")
+    args = parser.parse_args()
+
+    os.makedirs(args.output_dir, exist_ok=True)
+    timelines = load_timelines(args.data_dir)
+    backend = backend_from_args(args)
+    if "b" in args.task:
+        run_task_b(args, timelines, backend)
+    if "c" in args.task:
+        run_task_c(args, timelines, backend)
+    print(f"\nuOttawa ({args.variant}) run complete at {datetime.datetime.now():%Y%m%d-%H%M%S}.")
 
 
 if __name__ == "__main__":

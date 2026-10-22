@@ -242,6 +242,13 @@ class VLLMBackend:
         )
         self.sampling_params = SamplingParams(
             temperature=temperature, top_p=top_p, max_tokens=max_tokens)
+        # Effective context window (used by drop_until_fits when the caller
+        # did not pass --max_model_len, so over-long prompts are shortened
+        # instead of crashing a whole vLLM batch).
+        try:
+            self.max_model_len = self.llm.llm_engine.model_config.max_model_len
+        except AttributeError:
+            self.max_model_len = max_model_len
 
     def generate(self, batch_messages: list[list[dict]],
                  sampling_overrides: list[dict] | None = None) -> list[str]:
@@ -287,6 +294,7 @@ class OllamaBackend:
         self.client = ollama.Client(host=host) if host else ollama
         self.model = model
         self.options = {"temperature": temperature, "num_predict": max_tokens}
+        self.max_model_len = None
         self.system_message = system_message
 
     def generate(self, batch_messages: list[list[dict]],
@@ -314,9 +322,11 @@ class MockBackend:
     KDE) can be exercised.
     """
 
-    def __init__(self, max_tokens: int = 600, **kwargs):
+    def __init__(self, max_tokens: int = 600, max_model_len: int | None = None,
+                 **kwargs):
         print("[MockBackend] Using mock generation (no LLM loaded)")
         self.max_tokens = max_tokens
+        self.max_model_len = max_model_len
 
     def generate(self, batch_messages: list[list[dict]],
                  sampling_overrides: list[dict] | None = None) -> list[str]:
@@ -342,19 +352,77 @@ def make_backend(backend: str, model: str, temperature: float, max_tokens: int,
                  system_message: str | None = None, host: str | None = None,
                  tensor_parallel_size: int = 4, dtype: str = "auto",
                  quantization: str | None = None, gpu_memory_utilization: float = 0.9,
-                 max_model_len: int | None = None, seed: int | None = None):
+                 max_model_len: int | None = None, seed: int | None = None,
+                 top_p: float = 1.0):
     if backend == "vllm":
         return VLLMBackend(model, tensor_parallel_size=tensor_parallel_size,
                            dtype=dtype, quantization=quantization,
                            gpu_memory_utilization=gpu_memory_utilization,
                            max_model_len=max_model_len, seed=seed,
-                           temperature=temperature, max_tokens=max_tokens)
+                           temperature=temperature, top_p=top_p,
+                           max_tokens=max_tokens)
     if backend == "ollama":
         return OllamaBackend(model, host=host, temperature=temperature,
                              max_tokens=max_tokens, system_message=system_message)
     if backend == "mock":
-        return MockBackend(max_tokens=max_tokens)
+        return MockBackend(max_tokens=max_tokens, max_model_len=max_model_len)
     raise ValueError(f"Unknown backend: {backend}")
+
+
+# ── Embedding models (retrieval / KDE) ───────────────────────────────────────
+
+class MockEmbedder:
+    """Deterministic pseudo-embeddings (hash-seeded, L2-normalized) so the
+    retrieval and KDE code paths can be smoke-tested without model weights."""
+
+    def __init__(self, dim: int = 384):
+        self.dim = dim
+
+    def encode(self, texts, normalize_embeddings=True, show_progress_bar=False,
+               **kwargs):
+        out = []
+        for t in texts:
+            seed = int(hashlib.md5(t.encode("utf-8")).hexdigest()[:8], 16)
+            v = np.random.default_rng(seed).standard_normal(self.dim)
+            out.append(v / np.linalg.norm(v))
+        return np.asarray(out)
+
+
+class MockCrossEncoder:
+    """Deterministic pseudo cross-encoder scores for smoke tests."""
+
+    def predict(self, pairs):
+        return np.array([
+            int(hashlib.md5((a + "||" + b).encode("utf-8")).hexdigest()[:8], 16) / 2**32
+            for a, b in pairs])
+
+
+def make_embedder(model_name: str, mock: bool = False, device: str | None = None):
+    """SentenceTransformer embedder, or a MockEmbedder when mock=True."""
+    if mock:
+        print(f"[MockEmbedder] Standing in for {model_name}")
+        return MockEmbedder()
+    from sentence_transformers import SentenceTransformer
+    print(f"[Embedding] Loading {model_name}" + (f" on {device}" if device else ""))
+    return SentenceTransformer(model_name, device=device)
+
+
+def free_gpu_memory():
+    """Release cached GPU memory after retrieval models are deleted, so the
+    vLLM engine loaded afterwards can claim it."""
+    try:
+        import gc
+        import torch
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except ImportError:
+        pass
+
+
+def timeline_text(tl: Timeline, sep: str = "\n\n") -> str:
+    """All posts of a timeline concatenated in chronological order."""
+    return sep.join(p.text for p in tl.posts)
 
 
 # ── Resumable checkpointing ──────────────────────────────────────────────────
@@ -503,7 +571,13 @@ def drop_until_fits(build, backend, n_examples: int, max_model_len: int | None,
     prompt (a messages list). If even min_examples does not fit, returns the
     min_examples variant anyway (vLLM will raise if it truly cannot fit —
     better to fail loudly than silently skip posts).
+
+    If max_model_len is None, the backend's own context window is used when it
+    exposes one (VLLMBackend does), so the guard is active by default on the
+    cluster. Callers must record k_used so shortened prompts are reported.
     """
+    if max_model_len is None:
+        max_model_len = getattr(backend, "max_model_len", None)
     if max_model_len is None:
         return build(n_examples), n_examples
     k = n_examples
@@ -514,3 +588,117 @@ def drop_until_fits(build, backend, n_examples: int, max_model_len: int | None,
             return candidate, k
         k -= 1
     return build(min_examples), min_examples
+
+
+# ── Shared CLI ───────────────────────────────────────────────────────────────
+
+def add_common_args(parser, default_model: str, default_output: str,
+                    default_temperature: float = 0.1,
+                    default_batch_size: int = 16):
+    """Arguments every system script shares (data, backend, decoding, task)."""
+    parser.add_argument("--data_dir", required=True,
+                        help="Directory of shared-task timeline JSON files.")
+    parser.add_argument("--output_dir", default=default_output)
+    parser.add_argument("--task", default="bc", choices=["b", "c", "bc"],
+                        help="b = post-level, c = timeline-level, bc = both "
+                             "(one model load; Task B runs first).")
+    parser.add_argument("--backend", default="vllm", choices=["vllm", "ollama", "mock"],
+                        help="mock = no LLM and stand-in embedding models "
+                             "(smoke tests only).")
+    parser.add_argument("--model", default=default_model,
+                        help=f"Local weights path or id. Default: {default_model}.")
+    parser.add_argument("--tensor_parallel_size", type=int, default=4)
+    parser.add_argument("--dtype", default="auto")
+    parser.add_argument("--quantization", default=None)
+    parser.add_argument("--gpu_memory_utilization", type=float, default=0.9)
+    parser.add_argument("--max_model_len", type=int, default=None,
+                        help="Context window. Default: the model's own (read "
+                             "from vLLM); the prompt-length guard uses it.")
+    parser.add_argument("--temperature", type=float, default=default_temperature)
+    parser.add_argument("--top_p", type=float, default=1.0)
+    parser.add_argument("--max_tokens", type=int, default=600)
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--batch_size", type=int, default=default_batch_size)
+    parser.add_argument("--limit", type=int, default=None,
+                        help="Only the first N targets (posts for B, timelines "
+                             "for C) — smoke testing.")
+
+
+def backend_from_args(args):
+    backend = make_backend(
+        args.backend, args.model, temperature=args.temperature,
+        max_tokens=args.max_tokens, tensor_parallel_size=args.tensor_parallel_size,
+        dtype=args.dtype, quantization=args.quantization,
+        gpu_memory_utilization=args.gpu_memory_utilization,
+        max_model_len=args.max_model_len, seed=args.seed, top_p=args.top_p,
+    )
+    return backend
+
+
+def common_settings(args) -> list[tuple[str, object, str]]:
+    """Settings-log rows shared by every system."""
+    return [
+        ("backend", args.backend, "our setup (vLLM, local weights)"),
+        ("tensor_parallel_size", args.tensor_parallel_size, "our setup"),
+        ("max_model_len", args.max_model_len or "model default",
+         "our setup (prompt-length guard reads the effective window)"),
+        ("max_tokens", args.max_tokens, "our default — paper silent"),
+        ("top_p", args.top_p, "our default — paper silent"),
+        ("seed", args.seed, "our setup"),
+    ]
+
+
+# ── Timeline-level (Task C) prompt-length guard ─────────────────────────────
+
+# Per-post word caps tried, in order, once in-context examples have been
+# reduced to the minimum. Truncating every post (rather than dropping the
+# oldest posts) keeps the whole trajectory — beginning, middle, end — visible,
+# which is what the Task C prompts ask the model to describe.
+POST_WORD_CAPS = [None, 400, 200, 100, 50, 25]
+
+
+def truncate_words(text: str, cap: int | None) -> str:
+    if cap is None:
+        return text
+    words = text.split()
+    if len(words) <= cap:
+        return text
+    return " ".join(words[:cap]) + " [...]"
+
+
+def fit_timeline_prompt(build, backend, n_examples: int,
+                        max_model_len: int | None, max_tokens: int,
+                        min_examples: int = 0, keep_examples_down_to_cap: int = 100):
+    """Fit a timeline-level prompt into the context window.
+
+    `build(k, cap)` returns the messages for k in-context examples with every
+    post text (examples and target) truncated to `cap` words (None = full).
+
+    Order of shortening: with all n_examples kept, post texts are truncated
+    through POST_WORD_CAPS down to `keep_examples_down_to_cap` words; only if
+    that still does not fit is an example dropped and the caps retried. At
+    min_examples the caps continue down to the smallest. The in-context
+    examples define each system, so they are kept as long as posts can stay
+    reasonably long. Returns (messages, k_used, word_cap_used); callers record
+    both so any shortened prompt is reported.
+    """
+    if max_model_len is None:
+        max_model_len = getattr(backend, "max_model_len", None)
+    if max_model_len is None:
+        return build(n_examples, None), n_examples, None
+    budget = max_model_len - max_tokens - 64
+    soft_caps = [c for c in POST_WORD_CAPS
+                 if c is None or c >= keep_examples_down_to_cap]
+    for k in range(n_examples, min_examples - 1, -1):
+        caps = POST_WORD_CAPS if k == min_examples else soft_caps
+        for cap in caps:
+            msgs = build(k, cap)
+            if prompt_token_count(backend, msgs) <= budget:
+                return msgs, k, cap
+    return build(min_examples, POST_WORD_CAPS[-1]), min_examples, POST_WORD_CAPS[-1]
+
+
+def task_c_targets(timelines: list[Timeline], limit: int | None = None) -> list[Timeline]:
+    """Timelines with a gold timeline summary (the ones Task C is scored on)."""
+    out = [tl for tl in timelines if tl.summary]
+    return out[:limit] if limit else out

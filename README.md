@@ -56,30 +56,34 @@ target post's own timeline, for Task B and Task C alike). uOttawa is the one
 faithful exception on inputs — its prompt uses the raw post text only, exactly
 as in the paper.
 
-| Script | System | Method (Task B) | Original model |
+| Script | System | Method | Original model |
 |---|---|---|---|
 | `pipelines/eaionflux_model.py` | EAIonFlux (2nd place) | k-shot ICL (paper Appendix A.2/A.3 prompts), post/timeline vector DBs | llama3.3:70b |
-| `pipelines/bulusi_model.py` | BULUSI | 5-shot; contriever top-50 re-ranked by ms-marco-MiniLM-L-6-v2; team's actual prompt (their GitHub) | Qwen2.5-72B |
+| `pipelines/bulusi_model.py` | BULUSI | 5-shot; contriever top-50 re-ranked by ms-marco-MiniLM-L-6-v2; team's actual prompts (their GitHub) | Qwen2.5-72B |
 | `pipelines/aquarius_model.py` | Aquarius (Wang et al.) | one-shot; single most BGE-large-en-v1.5-similar post; paper Fig. 3 prompt | Qwen2.5-32B |
-| `pipelines/ism_model.py` | ISM | joint template (temp 0.1); 10 candidate summaries/post; Gaussian KDE (Scott's rule) selection over MiniLM embeddings | Meta-Llama-3-8B-Instruct |
+| `pipelines/ism_model.py` | ISM | joint template (temp 0.1); 10 candidate summaries/item; Gaussian KDE (Scott's rule) selection over MiniLM embeddings | Meta-Llama-3-8B-Instruct |
 | `pipelines/uottawa_model.py` | uOttawa (5th place Task B) | prompt engineering only, variants S1/S2/S3 (paper Table 7 template); no evidence input | Llama-3.3-70B |
 
 Every system script:
-* supports `--backend vllm` (cluster: local weights, `--tensor_parallel_size`, optional `--quantization`), `--backend ollama` (local single-GPU), and `--backend mock` (functional tests);
+* implements **both Task B and Task C** (`--task b`, `--task c`, or `--task bc` for one model load, Task B first);
+* supports `--backend vllm` (cluster: local weights, `--tensor_parallel_size`, optional `--quantization`), `--backend ollama` (local single-GPU), and `--backend mock` (functional tests — stand-in embedders too, so nothing downloads);
 * is **resumable** — per-post results append to a JSONL checkpoint and are skipped on restart;
 * writes an **official submission-format JSON** (the same structure as
   `dev.json` / the gold data, with gold evidence and well-being filled in) that
   plugs straight into `eval/task31_eval.py` and `clpsych2025/evaluation/run.py`;
 * writes a `*_settings.md` **decoding log** recording every generation/retrieval
   setting and whether it came from the paper or is our documented default (the
-  source for the paper's reimplementation section).
+  source for the paper's reimplementation section), including any prompts
+  shortened by the automatic context-window guard.
 
 ### Cluster run (all systems, original paper models)
 
 `pipelines/run_all_systems.sh` runs BULUSI (72B), Aquarius (32B), ISM (8B),
-uOttawa S2 (70B), and the EAIonFlux Tasks B+C rerun (70B) sequentially through
-vLLM with tensor parallelism across 4 GPUs, resumably and fully locally
-(local weights, `HF_HUB_OFFLINE=1`). Configure `DATA_DIR` and the `*_PATH`
+uOttawa S2 (70B), and the EAIonFlux rerun (70B) — **Task B only** — sequentially
+through vLLM with tensor parallelism across 4 GPUs, resumably and fully locally
+(local weights, `HF_HUB_OFFLINE=1`). Task C blocks for every system are
+included but commented out for later use (uOttawa's Task C cascades its own
+Task B summaries). Configure `DATA_DIR` and the `*_PATH`
 model directories, then:
 
 ```bash
